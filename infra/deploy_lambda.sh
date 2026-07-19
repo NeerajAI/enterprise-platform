@@ -10,9 +10,14 @@ FUNCTION_NAME="${LAMBDA_FUNCTION_NAME:-hello-world-lambda}"
 ROLE_NAME="${LAMBDA_ROLE_NAME:-hello-world-lambda-role}"
 ECR_URI="${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/${ECR_REPO_NAME}"
 
+# Every resource this pipeline creates is tagged AI=true so it can be found and torn down later.
+TAG_KEY="AI"
+TAG_VALUE="AI"
+
 echo "==> Ensuring ECR repo '${ECR_REPO_NAME}' exists"
 aws ecr describe-repositories --repository-names "${ECR_REPO_NAME}" --region "${AWS_REGION}" >/dev/null 2>&1 \
-  || aws ecr create-repository --repository-name "${ECR_REPO_NAME}" --region "${AWS_REGION}" >/dev/null
+  || aws ecr create-repository --repository-name "${ECR_REPO_NAME}" --region "${AWS_REGION}" \
+       --tags "Key=${TAG_KEY},Value=${TAG_VALUE}" >/dev/null
 
 echo "==> Logging in to ECR"
 aws ecr get-login-password --region "${AWS_REGION}" \
@@ -30,6 +35,7 @@ ROLE_ARN="$(aws iam get-role --role-name "${ROLE_NAME}" --query 'Role.Arn' --out
 if [ -z "${ROLE_ARN}" ]; then
   ROLE_ARN="$(aws iam create-role --role-name "${ROLE_NAME}" \
     --assume-role-policy-document '{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal":{"Service":"lambda.amazonaws.com"},"Action":"sts:AssumeRole"}]}' \
+    --tags "Key=${TAG_KEY},Value=${TAG_VALUE}" \
     --query 'Role.Arn' --output text)"
   aws iam attach-role-policy --role-name "${ROLE_NAME}" \
     --policy-arn arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
@@ -52,11 +58,13 @@ else
     --role "${ROLE_ARN}" \
     --timeout 15 \
     --memory-size 256 \
+    --tags "${TAG_KEY}=${TAG_VALUE}" \
     --region "${AWS_REGION}" >/dev/null
   aws lambda wait function-active --function-name "${FUNCTION_NAME}" --region "${AWS_REGION}"
 fi
 
 LAMBDA_ARN="$(aws lambda get-function --function-name "${FUNCTION_NAME}" --region "${AWS_REGION}" --query 'Configuration.FunctionArn' --output text)"
+aws lambda tag-resource --resource "${LAMBDA_ARN}" --tags "${TAG_KEY}=${TAG_VALUE}" --region "${AWS_REGION}"
 echo "Lambda deployed: ${LAMBDA_ARN}"
 
 {
