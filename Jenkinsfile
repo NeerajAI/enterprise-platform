@@ -7,7 +7,10 @@ pipeline {
         ECR_REPO_NAME        = 'hello-world-lambda'
         LAMBDA_FUNCTION_NAME = 'hello-world-lambda'
         API_NAME             = 'hello-world-api'
-        STAGE_NAME           = 'prod'
+        // Named API_STAGE_NAME (not STAGE_NAME) because Jenkins Declarative
+        // Pipeline auto-injects its own env.STAGE_NAME holding the current
+        // stage's display name, which would otherwise shadow this value.
+        API_STAGE_NAME       = 'prod'
         IMAGE_TAG            = "${env.BUILD_NUMBER}"
     }
 
@@ -47,7 +50,7 @@ pipeline {
                         passwordVariable: 'AWS_SECRET_ACCESS_KEY')]) {
                     sh '''
                         chmod +x infra/deploy_api_gateway.sh
-                        ./infra/deploy_api_gateway.sh
+                        STAGE_NAME="${API_STAGE_NAME}" ./infra/deploy_api_gateway.sh
                     '''
                 }
             }
