@@ -17,6 +17,10 @@ import sys
 import urllib.error
 import urllib.request
 
+from dotenv import load_dotenv
+
+load_dotenv(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env"))
+
 ENV_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "lambda_output.env")
 
 
