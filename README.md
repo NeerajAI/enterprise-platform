@@ -45,7 +45,7 @@ integration pointing at it, so the pipeline always deploys Lambda first.
 
 - `main` — currently unused/empty
 - `dev` — active development branch; the Jenkins job builds from here
-- `QA`, `PROD` — promotion targets (currently only contain the README; not yet wired to their own Jenkins jobs)
+- `QA`, `PROD` — promoted copies of `dev`'s pipeline code; not yet wired to their own Jenkins jobs (the `Enterprise-pipeline` job still builds from `dev`)
 
 ## AWS resource tagging
 
@@ -115,6 +115,21 @@ ID are written to `lambda_output.env` and archived as a build artifact.
 - [x] `Enterprise-pipeline` job created and linked to this repo/branch
 - [x] `aws-jenkins-creds` credential added
 - [x] AWS resource tagging (`AI: AI`) added to both deploy scripts
-- [ ] First successful end-to-end pipeline run (Lambda deploy stage was last
-      seen running — build image push and Lambda creation in progress)
-- [ ] Promote pipeline to `QA` / `PROD` branches
+- [x] First successful end-to-end pipeline run (build #7 — Checkout → Build &
+      Deploy Lambda → Deploy API Gateway → Smoke Test all green)
+- [x] Promoted pipeline code to `QA` / `PROD` branches
+
+Live endpoint (from the `dev` build): `https://yw4maai7z0.execute-api.us-east-1.amazonaws.com/prod/hello`
+(requires an `x-api-key` header — see the API key created by `infra/deploy_api_gateway.sh`).
+
+### Fixes that got the pipeline green
+
+- **`STAGE_NAME` collision**: Jenkins Declarative Pipeline auto-injects
+  `env.STAGE_NAME` with the *current stage's display name*, which silently
+  shadowed our own `STAGE_NAME = 'prod'` and made `create-deployment` fail
+  with `Stage name only allows a-zA-Z0-9_`. Fixed by renaming our variable to
+  `API_STAGE_NAME` and passing it explicitly to the script as `STAGE_NAME`.
+- **Smoke test flakiness**: a freshly created API key / usage-plan link can
+  take a few seconds to propagate, so the very first request could 403.
+  Fixed by adding `curl --retry 8 --retry-delay 3 --retry-all-errors` to the
+  smoke test step.
