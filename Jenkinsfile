@@ -65,10 +65,10 @@ pipeline {
                     sh '''
                         . ./lambda_output.env
                         API_KEY_VALUE=$(aws apigateway get-api-key --api-key "${API_KEY_ID}" --include-value --query value --output text --region "${AWS_REGION}")
-                        # A freshly created API key / usage-plan link can take a few seconds to
+                        # A freshly created API key / usage-plan link can take a while to
                         # propagate, so the first call(s) may 403 — retry with backoff instead
                         # of failing immediately.
-                        curl --retry 8 --retry-delay 3 --retry-all-errors -sf -H "x-api-key: ${API_KEY_VALUE}" "${INVOKE_URL}"
+                        curl --retry 15 --retry-delay 5 --retry-all-errors -sf -H "x-api-key: ${API_KEY_VALUE}" "${INVOKE_URL}"
                     '''
                 }
             }
