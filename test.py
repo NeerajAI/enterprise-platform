@@ -10,6 +10,7 @@ With no arguments it reads INVOKE_URL / API_KEY_ID from lambda_output.env,
 the artifact the Jenkins pipeline writes after a deploy.
 """
 
+#python test.py --url "https://pi0wh7lzll.execute-api.us-east-1.amazonaws.com/prod/hello" --api-key-id 3utzzidxo3
 import argparse
 import json
 import os
@@ -88,7 +89,7 @@ def main():
     except ValueError:
         payload = None
 
-    if status == 200 and payload == {"message": "Hello World"}:
+    if status == 200 and payload == {"message": "Hello World new test"}:
         print("PASS")
         sys.exit(0)
 
