@@ -30,6 +30,15 @@ Jenkins (running on AWS EC2)
 Order matters: the Lambda function must exist before API Gateway can create an
 integration pointing at it, so the pipeline always deploys Lambda first.
 
+### Infrastructure as code — or lack thereof
+
+There's no CloudFormation, SAM, CDK, or Terraform here. `infra/deploy_lambda.sh`
+and `infra/deploy_api_gateway.sh` are plain AWS CLI shell scripts that check
+whether each resource exists (`get-rest-apis`, `get-function`, etc.) and create
+it if not — hand-rolled idempotency instead of a declarative template engine
+managing state/diffs. Fine for a hello-world demo; worth revisiting (e.g. SAM
+or CDK) if this grows into something with more resources or environments.
+
 ## Repo layout
 
 | Path | Purpose |
@@ -119,7 +128,7 @@ ID are written to `lambda_output.env` and archived as a build artifact.
       Deploy Lambda → Deploy API Gateway → Smoke Test all green)
 - [x] Promoted pipeline code to `QA` / `PROD` branches
 
-Live endpoint (from the `dev` build): `https://yw4maai7z0.execute-api.us-east-1.amazonaws.com/prod/hello`
+Live endpoint (from the `dev` build): `https://pi0wh7lzll.execute-api.us-east-1.amazonaws.com/prod/hello`
 (requires an `x-api-key` header — see the API key created by `infra/deploy_api_gateway.sh`).
 
 ### Fixes that got the pipeline green
@@ -133,3 +142,8 @@ Live endpoint (from the `dev` build): `https://yw4maai7z0.execute-api.us-east-1.
   take a few seconds to propagate, so the very first request could 403.
   Fixed by adding `curl --retry 8 --retry-delay 3 --retry-all-errors` to the
   smoke test step.
+- **Smoke test flakiness, round 2**: the 8x3s retry budget (~28s) wasn't
+  always enough — one run exhausted every retry while the API key/usage-plan
+  link was still propagating, even though the config was correct (confirmed
+  by re-curling the same URL/key manually a few minutes later — 200 OK).
+  Widened to `--retry 15 --retry-delay 5` (~75s of headroom).
