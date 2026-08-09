@@ -12,6 +12,10 @@ pipeline {
         // stage's display name, which would otherwise shadow this value.
         API_STAGE_NAME       = 'prod'
         IMAGE_TAG            = "${env.BUILD_NUMBER}"
+        // Bucket name is the prefix + AWS account ID (computed in the script) since
+        // S3 bucket names must be globally unique and lowercase.
+        S3_BUCKET_PREFIX     = 'enterprise-bucket'
+        S3_OBJECT_KEY        = 'dummy_data.xlsx'
     }
 
     options {
@@ -23,6 +27,22 @@ pipeline {
         stage('Checkout') {
             steps {
                 checkout scm
+            }
+        }
+
+        // Runs before Lambda so the bucket (and s3_output.env, which records its
+        // name) exists in time for deploy_lambda.sh to wire up IAM + env vars.
+        stage('Deploy S3 Bucket & Upload Data') {
+            steps {
+                withCredentials([usernamePassword(
+                        credentialsId: 'aws-jenkins-creds',
+                        usernameVariable: 'AWS_ACCESS_KEY_ID',
+                        passwordVariable: 'AWS_SECRET_ACCESS_KEY')]) {
+                    sh '''
+                        chmod +x infra/deploy_s3.sh
+                        ./infra/deploy_s3.sh
+                    '''
+                }
             }
         }
 
@@ -83,7 +103,7 @@ pipeline {
             echo 'Pipeline failed — check the stage logs above.'
         }
         always {
-            archiveArtifacts artifacts: 'lambda_output.env', allowEmptyArchive: true
+            archiveArtifacts artifacts: 'lambda_output.env, s3_output.env', allowEmptyArchive: true
         }
     }
 }

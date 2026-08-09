@@ -10,6 +10,12 @@ FUNCTION_NAME="${LAMBDA_FUNCTION_NAME:-hello-world-lambda}"
 ROLE_NAME="${LAMBDA_ROLE_NAME:-hello-world-lambda-role}"
 ECR_URI="${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/${ECR_REPO_NAME}"
 
+# Populated by infra/deploy_s3.sh (run earlier in the pipeline) so this script
+# knows which bucket/object the Lambda should be wired up to read.
+if [ -f s3_output.env ]; then
+  . ./s3_output.env
+fi
+
 # Every resource this pipeline creates is tagged AI=true so it can be found and torn down later.
 TAG_KEY="AI"
 TAG_VALUE="AI"
@@ -43,11 +49,25 @@ if [ -z "${ROLE_ARN}" ]; then
   sleep 10
 fi
 
+if [ -n "${S3_BUCKET_NAME:-}" ]; then
+  echo "==> Granting Lambda role read access to s3://${S3_BUCKET_NAME}"
+  aws iam put-role-policy --role-name "${ROLE_NAME}" \
+    --policy-name "s3-read-${S3_BUCKET_NAME}" \
+    --policy-document "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"Allow\",\"Action\":\"s3:GetObject\",\"Resource\":\"arn:aws:s3:::${S3_BUCKET_NAME}/*\"}]}"
+fi
+
+LAMBDA_ENV_VARS="Variables={BUCKET_NAME=${S3_BUCKET_NAME:-},OBJECT_KEY=${S3_OBJECT_KEY:-dummy_data.xlsx}}"
+
 echo "==> Creating or updating Lambda function '${FUNCTION_NAME}'"
 if aws lambda get-function --function-name "${FUNCTION_NAME}" --region "${AWS_REGION}" >/dev/null 2>&1; then
   aws lambda update-function-code \
     --function-name "${FUNCTION_NAME}" \
     --image-uri "${ECR_URI}:${IMAGE_TAG}" \
+    --region "${AWS_REGION}" >/dev/null
+  aws lambda wait function-updated --function-name "${FUNCTION_NAME}" --region "${AWS_REGION}"
+  aws lambda update-function-configuration \
+    --function-name "${FUNCTION_NAME}" \
+    --environment "${LAMBDA_ENV_VARS}" \
     --region "${AWS_REGION}" >/dev/null
   aws lambda wait function-updated --function-name "${FUNCTION_NAME}" --region "${AWS_REGION}"
 else
@@ -58,6 +78,7 @@ else
     --role "${ROLE_ARN}" \
     --timeout 15 \
     --memory-size 256 \
+    --environment "${LAMBDA_ENV_VARS}" \
     --tags "${TAG_KEY}=${TAG_VALUE}" \
     --region "${AWS_REGION}" >/dev/null
   aws lambda wait function-active --function-name "${FUNCTION_NAME}" --region "${AWS_REGION}"

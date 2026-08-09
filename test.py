@@ -89,7 +89,13 @@ def main():
     except ValueError:
         payload = None
 
-    if status == 200 and payload == {"message": "Hello World new test"}:
+    if (
+        status == 200
+        and isinstance(payload, dict)
+        and payload.get("message") == "Hello World new test"
+        and isinstance(payload.get("dummy_data"), list)
+        and len(payload["dummy_data"]) > 0
+    ):
         print("PASS")
         sys.exit(0)
 

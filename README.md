@@ -12,23 +12,36 @@ GitHub (this repo)
       v
 Jenkins (running on AWS EC2)
       |
-      +-- Stage 1: Build & Deploy Lambda
+      +-- Stage 1: Deploy S3 Bucket & Upload Data
+      |       - create the tracking bucket (enterprise-bucket-<account-id>)
+      |       - upload data/dummy_data.xlsx into it
+      |
+      +-- Stage 2: Build & Deploy Lambda
       |       - build Docker image (lambda/Dockerfile)
       |       - push image to ECR
-      |       - create/update Lambda function from that image
+      |       - grant the Lambda role s3:GetObject on the bucket
+      |       - create/update Lambda function from that image, wired to the bucket
       |
-      +-- Stage 2: Deploy API Gateway
+      +-- Stage 3: Deploy API Gateway
       |       - create REST API + /hello GET route
       |       - Lambda proxy integration
       |       - require an API key on the route
       |       - attach a usage plan (throttling + quota, for tracking)
       |
-      +-- Stage 3: Smoke Test
-              - call the deployed endpoint with the API key, confirm "Hello World"
+      +-- Stage 4: Smoke Test
+              - call the deployed endpoint with the API key, confirm the
+                response includes the "Hello World" message and the rows
+                read from the Excel file in S3
 ```
 
-Order matters: the Lambda function must exist before API Gateway can create an
-integration pointing at it, so the pipeline always deploys Lambda first.
+Order matters: the S3 bucket must exist before the Lambda is deployed (so its
+name/IAM policy can be wired in), and the Lambda function must exist before
+API Gateway can create an integration pointing at it.
+
+On each `GET /hello` call, the Lambda function downloads `dummy_data.xlsx`
+from the S3 bucket and returns its rows alongside the hello-world message —
+this is what "read by lambda during api call" means in practice, as opposed
+to baking the data into the image.
 
 ### Infrastructure as code — or lack thereof
 
@@ -43,10 +56,12 @@ or CDK) if this grows into something with more resources or environments.
 
 | Path | Purpose |
 |---|---|
-| `lambda/app/main.py` | FastAPI app with `GET /hello` → `{"message": "Hello World"}`, wrapped with [Mangum](https://github.com/jordaneremieff/mangum) so it runs on Lambda |
-| `lambda/app/requirements.txt` | Python deps (`fastapi`, `mangum`) |
+| `lambda/app/main.py` | FastAPI app with `GET /hello` → hello-world message plus rows read from the Excel file in S3, wrapped with [Mangum](https://github.com/jordaneremieff/mangum) so it runs on Lambda |
+| `lambda/app/requirements.txt` | Python deps (`fastapi`, `mangum`, `boto3`, `openpyxl`) |
 | `lambda/Dockerfile` | Lambda container image, based on `public.ecr.aws/lambda/python:3.12` |
-| `infra/deploy_lambda.sh` | Builds the image, pushes to ECR, creates/updates the Lambda function and its execution role |
+| `data/dummy_data.xlsx` | Dummy Excel data uploaded to S3 and read by the Lambda on each call |
+| `infra/deploy_s3.sh` | Creates/updates the S3 tracking bucket and uploads `data/dummy_data.xlsx` to it |
+| `infra/deploy_lambda.sh` | Builds the image, pushes to ECR, creates/updates the Lambda function and its execution role (incl. S3 read access) |
 | `infra/deploy_api_gateway.sh` | Creates/updates the REST API, `/hello` route, API key, and usage plan |
 | `Jenkinsfile` | Declarative pipeline wiring the above stages together |
 
@@ -58,10 +73,10 @@ or CDK) if this grows into something with more resources or environments.
 
 ## AWS resource tagging
 
-Every AWS resource the scripts create (ECR repo, IAM role, Lambda function, REST
-API, API key, usage plan) is tagged `AI: AI`. This makes it possible to find and
-bulk-delete everything this pipeline provisioned, as opposed to resources created
-by hand.
+Every AWS resource the scripts create (S3 bucket, ECR repo, IAM role, Lambda
+function, REST API, API key, usage plan) is tagged `AI: AI`. This makes it
+possible to find and bulk-delete everything this pipeline provisioned, as
+opposed to resources created by hand.
 
 ## Jenkins setup
 
@@ -127,6 +142,14 @@ ID are written to `lambda_output.env` and archived as a build artifact.
 - [x] First successful end-to-end pipeline run (build #7 — Checkout → Build &
       Deploy Lambda → Deploy API Gateway → Smoke Test all green)
 - [x] Promoted pipeline code to `QA` / `PROD` branches
+- [ ] S3 tracking bucket + dummy Excel read wired into the pipeline (not yet
+      run — needs a pipeline build to confirm green end-to-end)
+
+### S3 bucket naming
+
+Requested name was `EnterpriseBucket`, but S3 bucket names must be lowercase
+and globally unique across all AWS accounts, so the actual name is computed
+as `enterprise-bucket-<aws-account-id>` (see `infra/deploy_s3.sh`).
 
 Live endpoint (from the `dev` build): `https://pi0wh7lzll.execute-api.us-east-1.amazonaws.com/prod/hello`
 (requires an `x-api-key` header — see the API key created by `infra/deploy_api_gateway.sh`).
