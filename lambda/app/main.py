@@ -1,3 +1,4 @@
+import io
 import os
 
 import boto3
@@ -15,7 +16,9 @@ def read_dummy_data():
     key = os.environ.get("OBJECT_KEY", "dummy_data.xlsx")
 
     obj = s3.get_object(Bucket=bucket, Key=key)
-    workbook = openpyxl.load_workbook(obj["Body"], read_only=True)
+    # boto3's StreamingBody isn't seekable, but openpyxl (via zipfile) needs
+    # random access to parse the .xlsx, so buffer it into memory first.
+    workbook = openpyxl.load_workbook(io.BytesIO(obj["Body"].read()), read_only=True)
     sheet = workbook.active
 
     rows = list(sheet.iter_rows(values_only=True))
