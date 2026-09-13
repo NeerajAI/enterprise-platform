@@ -110,14 +110,18 @@ pipeline {
                         # of failing immediately.
                         START_RESPONSE=$(curl --retry 15 --retry-delay 5 --retry-all-errors -sf -H "x-api-key: ${API_KEY_VALUE}" "${INVOKE_URL}")
                         echo "Start response: ${START_RESPONSE}"
-                        REQUEST_ID=$(echo "${START_RESPONSE}" | grep -oP "\\"request_id\\"\\s*:\\s*\\"\\K[^\\"]+")
+                        REQUEST_ID=$(echo "${START_RESPONSE}" | grep -oP "\\"request_id\\"\\s*:\\s*\\"\\K[^\\"]+" || true)
                         [ -n "${REQUEST_ID}" ] || { echo "No request_id in orchestrator response"; exit 1; }
 
                         # The orchestrator only kicks off the inference Lambda asynchronously,
                         # so poll for the result instead of expecting it in the first response.
+                        # No -f here, and every step is guarded with `|| true`: Jenkins' sh step
+                        # runs with set -e, so an unguarded failure on any single poll attempt
+                        # (a transient non-2xx, or no match in the JSON yet) would kill this whole
+                        # script instead of letting the loop retry.
                         for i in $(seq 1 20); do
-                            RESULT=$(curl -sf -H "x-api-key: ${API_KEY_VALUE}" "${INVOKE_URL}?request_id=${REQUEST_ID}")
-                            STATUS=$(echo "${RESULT}" | grep -oP "\\"status\\"\\s*:\\s*\\"\\K[^\\"]+")
+                            RESULT=$(curl -s -H "x-api-key: ${API_KEY_VALUE}" "${INVOKE_URL}?request_id=${REQUEST_ID}" || true)
+                            STATUS=$(echo "${RESULT}" | grep -oP "\\"status\\"\\s*:\\s*\\"\\K[^\\"]+" || true)
                             if [ "${STATUS}" = "done" ]; then
                                 echo "Result: ${RESULT}"
                                 exit 0
