@@ -93,11 +93,18 @@ fi
 echo "==> Account Lambda concurrency limits (diagnostic, in case the reservation below is rejected):"
 aws lambda get-account-settings --region "${AWS_REGION}" --query 'AccountLimit' --output json || true
 
+# Best-effort: AWS requires >=10 executions to stay in the account's shared
+# unreserved pool after any reservation, and some accounts (new/sandboxed)
+# start with a total "Concurrent executions" quota as low as 10 -- on those,
+# no positive reservation is possible until AWS approves a quota increase
+# (Service Quotas -> Lambda -> Concurrent executions -> Request increase).
+# Don't let that block the rest of the deploy; just warn.
 echo "==> Capping reserved concurrency at ${RESERVED_CONCURRENCY} (bounds fan-out from the orchestrator, keeps a slice out of the account's shared pool)"
 aws lambda put-function-concurrency \
   --function-name "${FUNCTION_NAME}" \
   --reserved-concurrent-executions "${RESERVED_CONCURRENCY}" \
-  --region "${AWS_REGION}" >/dev/null
+  --region "${AWS_REGION}" >/dev/null \
+  || echo "WARNING: could not set reserved concurrency (likely insufficient account-level Concurrent executions quota) -- continuing without it"
 
 LAMBDA_ARN="$(aws lambda get-function --function-name "${FUNCTION_NAME}" --region "${AWS_REGION}" --query 'Configuration.FunctionArn' --output text)"
 aws lambda tag-resource --resource "${LAMBDA_ARN}" --tags "${TAG_KEY}=${TAG_VALUE}" --region "${AWS_REGION}"
