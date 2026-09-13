@@ -83,6 +83,26 @@ a declarative template engine managing state/diffs. Fine for a hello-world demo;
 worth revisiting (e.g. SAM or CDK) if this grows into something with more
 resources or environments.
 
+## Alternative option: SQS-decoupled inference (not implemented)
+
+The deployed architecture above has the orchestrator invoke the inference
+Lambda directly and asynchronously. That's simple, but it has two gaps: a
+failed invoke is silently dropped (Lambda's async retries exhaust with no
+record of what happened), and there's no ceiling on how many inference
+invocations can fan out at once.
+
+![Alternative architecture diagram: the orchestrator sends a message to an SQS queue instead of invoking the inference Lambda directly; the inference Lambda is triggered by the queue via an event source mapping; messages that fail repeatedly move to a dead-letter queue instead of being silently dropped.](docs/architecture-sqs-option.svg)
+
+Swapping the direct invoke for an SQS queue between the two Lambdas would
+fix both: the queue buffers and throttles the fan-out naturally, and a
+dead-letter queue captures any message the inference Lambda can't
+successfully process after repeated attempts, instead of it vanishing.
+Everything else — S3 for the result, the orchestrator's polling endpoint,
+the CI/CD pipeline — stays the same either way.
+
+This is presented as a second option, not implemented here — the deployed
+app still uses the direct-invoke design described above.
+
 ## Repo layout
 
 | Path | Purpose |
@@ -100,6 +120,7 @@ resources or environments.
 | `infra/deploy_api_gateway.sh` | Creates/updates the REST API, `/hello` route, API key, and usage plan |
 | `Jenkinsfile` | Declarative pipeline wiring the above stages together |
 | `docs/architecture.svg` | Architecture diagram embedded above |
+| `docs/architecture-sqs-option.svg` | Alternative (not implemented) SQS-decoupled architecture diagram |
 
 ## Branch strategy
 
