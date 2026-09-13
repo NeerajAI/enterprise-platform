@@ -1,5 +1,6 @@
 import io
 import json
+import logging
 import os
 
 import boto3
@@ -10,6 +11,16 @@ s3 = boto3.client("s3")
 BUCKET_NAME = os.environ["BUCKET_NAME"]
 OBJECT_KEY = os.environ.get("OBJECT_KEY", "dummy_data.xlsx")
 RESULTS_PREFIX = os.environ.get("RESULTS_PREFIX", "results/")
+
+logger = logging.getLogger()
+logger.setLevel(logging.INFO)
+
+
+def log_stage(message: str, width: int = 80) -> None:
+    text = f" {message} "
+    dashes = max(width - len(text), 4)
+    left = dashes // 2
+    logger.info("-" * left + text + "-" * (dashes - left))
 
 
 def read_dummy_data():
@@ -30,17 +41,24 @@ def handler(event, context):
     # is handed off via S3 instead, keyed by request_id for the orchestrator
     # to poll.
     request_id = event["request_id"]
+    log_stage(f"STAGE 6: inference Lambda invoked asynchronously, request_id={request_id}")
+
+    log_stage(f"STAGE 7: reading dummy_data.xlsx from S3, request_id={request_id}")
+    dummy_data = read_dummy_data()
+    log_stage(f"STAGE 7 done: read {len(dummy_data)} rows from S3, request_id={request_id}")
 
     result = {
         "request_id": request_id,
         "status": "done",
         "message": "Hello World new test",
-        "dummy_data": read_dummy_data(),
+        "dummy_data": dummy_data,
     }
 
+    log_stage(f"STAGE 8: writing result to S3, request_id={request_id}")
     s3.put_object(
         Bucket=BUCKET_NAME,
         Key=f"{RESULTS_PREFIX}{request_id}.json",
         Body=json.dumps(result).encode("utf-8"),
         ContentType="application/json",
     )
+    log_stage(f"STAGE 8 done: result written to S3, request_id={request_id}")

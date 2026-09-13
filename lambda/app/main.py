@@ -1,4 +1,5 @@
 import json
+import logging
 import os
 import uuid
 from typing import Optional
@@ -17,9 +18,20 @@ BUCKET_NAME = os.environ["BUCKET_NAME"]
 RESULTS_PREFIX = os.environ.get("RESULTS_PREFIX", "results/")
 INFERENCE_LAMBDA_NAME = os.environ["INFERENCE_LAMBDA_NAME"]
 
+logger = logging.getLogger()
+logger.setLevel(logging.INFO)
+
+
+def log_stage(message: str, width: int = 80) -> None:
+    text = f" {message} "
+    dashes = max(width - len(text), 4)
+    left = dashes // 2
+    logger.info("-" * left + text + "-" * (dashes - left))
+
 
 def start_inference():
     request_id = str(uuid.uuid4())
+    log_stage(f"STAGE 2: orchestrator invoking inference Lambda asynchronously, request_id={request_id}")
     # Fire-and-forget: InvocationType="Event" returns as soon as the invoke is
     # accepted, without waiting for the inference Lambda to finish. That's what
     # keeps this orchestrator's own response time well under API Gateway's 30s
@@ -29,6 +41,7 @@ def start_inference():
         InvocationType="Event",
         Payload=json.dumps({"request_id": request_id}).encode("utf-8"),
     )
+    log_stage(f"STAGE 3: inference Lambda invoked, returning request_id={request_id} to caller")
     return request_id
 
 
@@ -43,13 +56,17 @@ def get_result(request_id: str):
         # Both mean the same thing here: the inference Lambda hasn't written
         # the result yet.
         if e.response["Error"]["Code"] in ("NoSuchKey", "AccessDenied"):
+            log_stage(f"STAGE 5: result not ready yet, request_id={request_id}")
             return {"request_id": request_id, "status": "processing"}
         raise
+    log_stage(f"STAGE 5: result found in S3, request_id={request_id}")
     return json.loads(obj["Body"].read())
 
 
 @app.get("/hello")
 def hello(request_id: Optional[str] = None):
+    log_stage("STAGE 1: API Gateway called orchestrator Lambda")
+
     # No request_id yet: kick off a new inference job and hand back its id.
     if not request_id:
         new_request_id = start_inference()
@@ -60,6 +77,7 @@ def hello(request_id: Optional[str] = None):
         }
 
     # request_id given: report whatever the inference Lambda has written so far.
+    log_stage(f"STAGE 4: orchestrator polling S3 for result, request_id={request_id}")
     return get_result(request_id)
 
 
