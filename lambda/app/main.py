@@ -4,6 +4,7 @@ import uuid
 from typing import Optional
 
 import boto3
+from botocore.exceptions import ClientError
 from fastapi import FastAPI
 from mangum import Mangum
 
@@ -35,8 +36,15 @@ def get_result(request_id: str):
     key = f"{RESULTS_PREFIX}{request_id}.json"
     try:
         obj = s3.get_object(Bucket=BUCKET_NAME, Key=key)
-    except s3.exceptions.NoSuchKey:
-        return {"request_id": request_id, "status": "processing"}
+    except ClientError as e:
+        # This role has s3:GetObject but not s3:ListBucket, so S3 reports a
+        # missing key as 403 AccessDenied rather than 404 NoSuchKey (it won't
+        # confirm non-existence to a principal that can't list the bucket).
+        # Both mean the same thing here: the inference Lambda hasn't written
+        # the result yet.
+        if e.response["Error"]["Code"] in ("NoSuchKey", "AccessDenied"):
+            return {"request_id": request_id, "status": "processing"}
+        raise
     return json.loads(obj["Body"].read())
 
 
