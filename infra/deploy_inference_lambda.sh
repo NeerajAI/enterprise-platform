@@ -13,6 +13,7 @@ FUNCTION_NAME="${INFERENCE_LAMBDA_FUNCTION_NAME:-hello-world-inference-lambda}"
 ROLE_NAME="${INFERENCE_LAMBDA_ROLE_NAME:-hello-world-inference-lambda-role}"
 ECR_URI="${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/${ECR_REPO_NAME}"
 RESULTS_PREFIX="${RESULTS_PREFIX:-results/}"
+RESERVED_CONCURRENCY="${INFERENCE_LAMBDA_RESERVED_CONCURRENCY:-6}"
 
 # Populated by infra/deploy_s3.sh (run earlier in the pipeline) so this script
 # knows which bucket/object the Lambda should be wired up to read from / write results to.
@@ -88,6 +89,12 @@ else
     --region "${AWS_REGION}" >/dev/null
   aws lambda wait function-active --function-name "${FUNCTION_NAME}" --region "${AWS_REGION}"
 fi
+
+echo "==> Capping reserved concurrency at ${RESERVED_CONCURRENCY} (bounds fan-out from the orchestrator, keeps a slice out of the account's shared pool)"
+aws lambda put-function-concurrency \
+  --function-name "${FUNCTION_NAME}" \
+  --reserved-concurrent-executions "${RESERVED_CONCURRENCY}" \
+  --region "${AWS_REGION}" >/dev/null
 
 LAMBDA_ARN="$(aws lambda get-function --function-name "${FUNCTION_NAME}" --region "${AWS_REGION}" --query 'Configuration.FunctionArn' --output text)"
 aws lambda tag-resource --resource "${LAMBDA_ARN}" --tags "${TAG_KEY}=${TAG_VALUE}" --region "${AWS_REGION}"
