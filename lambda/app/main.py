@@ -1,34 +1,58 @@
-import io
+import json
 import os
+import uuid
+from typing import Optional
 
 import boto3
-import openpyxl
 from fastapi import FastAPI
 from mangum import Mangum
 
 app = FastAPI()
 
 s3 = boto3.client("s3")
+lambda_client = boto3.client("lambda")
+
+BUCKET_NAME = os.environ["BUCKET_NAME"]
+RESULTS_PREFIX = os.environ.get("RESULTS_PREFIX", "results/")
+INFERENCE_LAMBDA_NAME = os.environ["INFERENCE_LAMBDA_NAME"]
 
 
-def read_dummy_data():
-    bucket = os.environ["BUCKET_NAME"]
-    key = os.environ.get("OBJECT_KEY", "dummy_data.xlsx")
+def start_inference():
+    request_id = str(uuid.uuid4())
+    # Fire-and-forget: InvocationType="Event" returns as soon as the invoke is
+    # accepted, without waiting for the inference Lambda to finish. That's what
+    # keeps this orchestrator's own response time well under API Gateway's 30s
+    # integration timeout, regardless of how long the actual work takes.
+    lambda_client.invoke(
+        FunctionName=INFERENCE_LAMBDA_NAME,
+        InvocationType="Event",
+        Payload=json.dumps({"request_id": request_id}).encode("utf-8"),
+    )
+    return request_id
 
-    obj = s3.get_object(Bucket=bucket, Key=key)
-    # boto3's StreamingBody isn't seekable, but openpyxl (via zipfile) needs
-    # random access to parse the .xlsx, so buffer it into memory first.
-    workbook = openpyxl.load_workbook(io.BytesIO(obj["Body"].read()), read_only=True)
-    sheet = workbook.active
 
-    rows = list(sheet.iter_rows(values_only=True))
-    header, data_rows = rows[0], rows[1:]
-    return [dict(zip(header, row)) for row in data_rows]
+def get_result(request_id: str):
+    key = f"{RESULTS_PREFIX}{request_id}.json"
+    try:
+        obj = s3.get_object(Bucket=BUCKET_NAME, Key=key)
+    except s3.exceptions.NoSuchKey:
+        return {"request_id": request_id, "status": "processing"}
+    return json.loads(obj["Body"].read())
 
 
 @app.get("/hello")
-def hello():
-    return {"message": "Hello World new test", "dummy_data": read_dummy_data()}
+def hello(request_id: Optional[str] = None):
+    # No request_id yet: kick off a new inference job and hand back its id.
+    if not request_id:
+        new_request_id = start_inference()
+        return {
+            "message": "Hello World new test",
+            "status": "processing",
+            "request_id": new_request_id,
+        }
+
+    # request_id given: report whatever the inference Lambda has written so far.
+    return get_result(request_id)
 
 
 handler = Mangum(app)

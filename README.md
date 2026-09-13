@@ -16,52 +16,85 @@ Jenkins (running on AWS EC2)
       |       - create the tracking bucket (enterprise-bucket-<account-id>)
       |       - upload data/dummy_data.xlsx into it
       |
-      +-- Stage 2: Build & Deploy Lambda
+      +-- Stage 2: Build & Deploy Inference Lambda
+      |       - build Docker image (lambda_inference/Dockerfile)
+      |       - push image to ECR
+      |       - grant the role s3:GetObject (source data) + s3:PutObject (results)
+      |       - create/update the inference Lambda function
+      |
+      +-- Stage 3: Build & Deploy Lambda (orchestrator)
       |       - build Docker image (lambda/Dockerfile)
       |       - push image to ECR
-      |       - grant the Lambda role s3:GetObject on the bucket
-      |       - create/update Lambda function from that image, wired to the bucket
+      |       - grant the role s3:GetObject on the bucket + lambda:InvokeFunction
+      |         on the inference Lambda
+      |       - create/update the orchestrator Lambda function
       |
-      +-- Stage 3: Deploy API Gateway
+      +-- Stage 4: Deploy API Gateway
       |       - create REST API + /hello GET route
-      |       - Lambda proxy integration
+      |       - Lambda proxy integration (points at the orchestrator)
       |       - require an API key on the route
       |       - attach a usage plan (throttling + quota, for tracking)
       |
-      +-- Stage 4: Smoke Test
-              - call the deployed endpoint with the API key, confirm the
-                response includes the "Hello World" message and the rows
-                read from the Excel file in S3
+      +-- Stage 5: Smoke Test
+              - call /hello, get back a request_id, poll /hello?request_id=...
+                until the inference Lambda's result is ready, confirm it
+                includes the "Hello World" message and the rows read from
+                the Excel file in S3
 ```
 
-Order matters: the S3 bucket must exist before the Lambda is deployed (so its
-name/IAM policy can be wired in), and the Lambda function must exist before
-API Gateway can create an integration pointing at it.
+Order matters: the S3 bucket must exist before either Lambda is deployed (so
+its name/IAM policy can be wired in), the inference Lambda must exist before
+the orchestrator (so the orchestrator's role can be granted `InvokeFunction`
+on it), and the orchestrator must exist before API Gateway can create an
+integration pointing at it.
 
-On each `GET /hello` call, the Lambda function downloads `dummy_data.xlsx`
-from the S3 bucket and returns its rows alongside the hello-world message —
-this is what "read by lambda during api call" means in practice, as opposed
-to baking the data into the image.
+### Two Lambdas: orchestrator + inference
+
+API Gateway enforces a hard 30s integration timeout — if the backing Lambda
+hasn't responded by then, it just returns a 504, no matter how long the
+Lambda would eventually take. To stay safely under that regardless of how
+slow the actual work gets, the work is split across two Lambdas:
+
+- **`hello-world-lambda` (orchestrator)** — sits behind API Gateway. On
+  `GET /hello` (no `request_id`), it generates a `request_id`, invokes the
+  inference Lambda **asynchronously** (`InvocationType="Event"` — returns as
+  soon as AWS accepts the invoke, without waiting for it to finish), and
+  immediately replies `{"status": "processing", "request_id": ...}`. On
+  `GET /hello?request_id=...`, it instead checks S3 for that request's result
+  and returns it (or `{"status": "processing"}` if it isn't there yet).
+- **`hello-world-inference-lambda` (inference)** — does the actual work that
+  used to run inline: downloads `dummy_data.xlsx` from S3, reads its rows,
+  and writes the result to `s3://<bucket>/results/<request_id>.json`. Nothing
+  is waiting on its return value, so it's free to take as long as it needs
+  (its own Lambda timeout is 60s, independent of API Gateway's 30s limit).
+
+Callers therefore poll: call `/hello` to kick off a job, then call
+`/hello?request_id=<id>` (see `test.py`) until `status` comes back `"done"`.
 
 ### Infrastructure as code — or lack thereof
 
-There's no CloudFormation, SAM, CDK, or Terraform here. `infra/deploy_lambda.sh`
-and `infra/deploy_api_gateway.sh` are plain AWS CLI shell scripts that check
-whether each resource exists (`get-rest-apis`, `get-function`, etc.) and create
-it if not — hand-rolled idempotency instead of a declarative template engine
-managing state/diffs. Fine for a hello-world demo; worth revisiting (e.g. SAM
-or CDK) if this grows into something with more resources or environments.
+There's no CloudFormation, SAM, CDK, or Terraform here. `infra/deploy_lambda.sh`,
+`infra/deploy_inference_lambda.sh`, and `infra/deploy_api_gateway.sh` are plain
+AWS CLI shell scripts that check whether each resource exists (`get-rest-apis`,
+`get-function`, etc.) and create it if not — hand-rolled idempotency instead of
+a declarative template engine managing state/diffs. Fine for a hello-world demo;
+worth revisiting (e.g. SAM or CDK) if this grows into something with more
+resources or environments.
 
 ## Repo layout
 
 | Path | Purpose |
 |---|---|
-| `lambda/app/main.py` | FastAPI app with `GET /hello` → hello-world message plus rows read from the Excel file in S3, wrapped with [Mangum](https://github.com/jordaneremieff/mangum) so it runs on Lambda |
-| `lambda/app/requirements.txt` | Python deps (`fastapi`, `mangum`, `boto3`, `openpyxl`) |
-| `lambda/Dockerfile` | Lambda container image, based on `public.ecr.aws/lambda/python:3.12` |
-| `data/dummy_data.xlsx` | Dummy Excel data uploaded to S3 and read by the Lambda on each call |
+| `lambda/app/main.py` | Orchestrator: FastAPI app with `GET /hello` → starts an async inference job (or polls S3 for its result if given `request_id`), wrapped with [Mangum](https://github.com/jordaneremieff/mangum) so it runs on Lambda |
+| `lambda/app/requirements.txt` | Orchestrator Python deps (`fastapi`, `mangum`, `boto3`) |
+| `lambda/Dockerfile` | Orchestrator Lambda container image, based on `public.ecr.aws/lambda/python:3.12` |
+| `lambda_inference/app/main.py` | Inference Lambda: plain `handler(event, context)` invoked asynchronously by the orchestrator — reads the Excel file from S3 and writes the result to `s3://<bucket>/results/<request_id>.json` |
+| `lambda_inference/app/requirements.txt` | Inference Lambda Python deps (`boto3`, `openpyxl`) |
+| `lambda_inference/Dockerfile` | Inference Lambda container image |
+| `data/dummy_data.xlsx` | Dummy Excel data uploaded to S3 and read by the inference Lambda on each job |
 | `infra/deploy_s3.sh` | Creates/updates the S3 tracking bucket and uploads `data/dummy_data.xlsx` to it |
-| `infra/deploy_lambda.sh` | Builds the image, pushes to ECR, creates/updates the Lambda function and its execution role (incl. S3 read access) |
+| `infra/deploy_inference_lambda.sh` | Builds the inference image, pushes to ECR, creates/updates the inference Lambda function and its execution role (S3 read + write) |
+| `infra/deploy_lambda.sh` | Builds the orchestrator image, pushes to ECR, creates/updates the orchestrator Lambda function and its execution role (S3 read + permission to invoke the inference Lambda) |
 | `infra/deploy_api_gateway.sh` | Creates/updates the REST API, `/hello` route, API key, and usage plan |
 | `Jenkinsfile` | Declarative pipeline wiring the above stages together |
 
@@ -130,7 +163,8 @@ Add it under **Manage Jenkins → Credentials → System → Global → Add Cred
 
 From the job page, click **Build Now**. Progress and logs are visible under
 **Console Output** for each build number. On success, the invoke URL and API key
-ID are written to `lambda_output.env` and archived as a build artifact.
+ID are written to `lambda_output.env`, the inference Lambda's name/ARN to
+`inference_lambda_output.env`, and both are archived as build artifacts.
 
 ## Status
 

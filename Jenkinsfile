@@ -6,6 +6,9 @@ pipeline {
         AWS_DEFAULT_REGION   = "${AWS_REGION}"
         ECR_REPO_NAME        = 'hello-world-lambda'
         LAMBDA_FUNCTION_NAME = 'hello-world-lambda'
+        INFERENCE_ECR_REPO_NAME        = 'hello-world-inference-lambda'
+        INFERENCE_LAMBDA_FUNCTION_NAME = 'hello-world-inference-lambda'
+        RESULTS_PREFIX       = 'results/'
         API_NAME             = 'hello-world-api'
         // Named API_STAGE_NAME (not STAGE_NAME) because Jenkins Declarative
         // Pipeline auto-injects its own env.STAGE_NAME holding the current
@@ -41,6 +44,22 @@ pipeline {
                     sh '''
                         chmod +x infra/deploy_s3.sh
                         ./infra/deploy_s3.sh
+                    '''
+                }
+            }
+        }
+
+        // Runs before the orchestrator Lambda so deploy_lambda.sh can read
+        // inference_lambda_output.env and wire up the invoke permission + name.
+        stage('Build & Deploy Inference Lambda') {
+            steps {
+                withCredentials([usernamePassword(
+                        credentialsId: 'aws-jenkins-creds',
+                        usernameVariable: 'AWS_ACCESS_KEY_ID',
+                        passwordVariable: 'AWS_SECRET_ACCESS_KEY')]) {
+                    sh '''
+                        chmod +x infra/deploy_inference_lambda.sh
+                        ./infra/deploy_inference_lambda.sh
                     '''
                 }
             }
@@ -85,10 +104,28 @@ pipeline {
                     sh '''
                         . ./lambda_output.env
                         API_KEY_VALUE=$(aws apigateway get-api-key --api-key "${API_KEY_ID}" --include-value --query value --output text --region "${AWS_REGION}")
+
                         # A freshly created API key / usage-plan link can take a while to
                         # propagate, so the first call(s) may 403 — retry with backoff instead
                         # of failing immediately.
-                        curl --retry 15 --retry-delay 5 --retry-all-errors -sf -H "x-api-key: ${API_KEY_VALUE}" "${INVOKE_URL}"
+                        START_RESPONSE=$(curl --retry 15 --retry-delay 5 --retry-all-errors -sf -H "x-api-key: ${API_KEY_VALUE}" "${INVOKE_URL}")
+                        echo "Start response: ${START_RESPONSE}"
+                        REQUEST_ID=$(echo "${START_RESPONSE}" | grep -oP "\\"request_id\\"\\s*:\\s*\\"\\K[^\\"]+")
+                        [ -n "${REQUEST_ID}" ] || { echo "No request_id in orchestrator response"; exit 1; }
+
+                        # The orchestrator only kicks off the inference Lambda asynchronously,
+                        # so poll for the result instead of expecting it in the first response.
+                        for i in $(seq 1 20); do
+                            RESULT=$(curl -sf -H "x-api-key: ${API_KEY_VALUE}" "${INVOKE_URL}?request_id=${REQUEST_ID}")
+                            STATUS=$(echo "${RESULT}" | grep -oP "\\"status\\"\\s*:\\s*\\"\\K[^\\"]+")
+                            if [ "${STATUS}" = "done" ]; then
+                                echo "Result: ${RESULT}"
+                                exit 0
+                            fi
+                            sleep 3
+                        done
+                        echo "Inference Lambda did not finish in time"
+                        exit 1
                     '''
                 }
             }
@@ -103,7 +140,7 @@ pipeline {
             echo 'Pipeline failed — check the stage logs above.'
         }
         always {
-            archiveArtifacts artifacts: 'lambda_output.env, s3_output.env', allowEmptyArchive: true
+            archiveArtifacts artifacts: 'lambda_output.env, s3_output.env, inference_lambda_output.env', allowEmptyArchive: true
         }
     }
 }

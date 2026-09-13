@@ -16,6 +16,12 @@ if [ -f s3_output.env ]; then
   . ./s3_output.env
 fi
 
+# Populated by infra/deploy_inference_lambda.sh (run earlier in the pipeline) so
+# this orchestrator knows which inference Lambda to invoke asynchronously.
+if [ -f inference_lambda_output.env ]; then
+  . ./inference_lambda_output.env
+fi
+
 # Every resource this pipeline creates is tagged AI=true so it can be found and torn down later.
 TAG_KEY="AI"
 TAG_VALUE="AI"
@@ -50,13 +56,22 @@ if [ -z "${ROLE_ARN}" ]; then
 fi
 
 if [ -n "${S3_BUCKET_NAME:-}" ]; then
+  # Covers the whole bucket, which is also where the inference Lambda writes
+  # results/*.json — this orchestrator needs to read those back when polled.
   echo "==> Granting Lambda role read access to s3://${S3_BUCKET_NAME}"
   aws iam put-role-policy --role-name "${ROLE_NAME}" \
     --policy-name "s3-read-${S3_BUCKET_NAME}" \
     --policy-document "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"Allow\",\"Action\":\"s3:GetObject\",\"Resource\":\"arn:aws:s3:::${S3_BUCKET_NAME}/*\"}]}"
 fi
 
-LAMBDA_ENV_VARS="Variables={BUCKET_NAME=${S3_BUCKET_NAME:-},OBJECT_KEY=${S3_OBJECT_KEY:-dummy_data.xlsx}}"
+if [ -n "${INFERENCE_LAMBDA_FUNCTION_ARN:-}" ]; then
+  echo "==> Granting Lambda role permission to invoke '${INFERENCE_LAMBDA_FUNCTION_NAME}' asynchronously"
+  aws iam put-role-policy --role-name "${ROLE_NAME}" \
+    --policy-name "invoke-${INFERENCE_LAMBDA_FUNCTION_NAME}" \
+    --policy-document "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"Allow\",\"Action\":\"lambda:InvokeFunction\",\"Resource\":\"${INFERENCE_LAMBDA_FUNCTION_ARN}\"}]}"
+fi
+
+LAMBDA_ENV_VARS="Variables={BUCKET_NAME=${S3_BUCKET_NAME:-},OBJECT_KEY=${S3_OBJECT_KEY:-dummy_data.xlsx},RESULTS_PREFIX=${RESULTS_PREFIX:-results/},INFERENCE_LAMBDA_NAME=${INFERENCE_LAMBDA_FUNCTION_NAME:-}}"
 
 echo "==> Creating or updating Lambda function '${FUNCTION_NAME}'"
 if aws lambda get-function --function-name "${FUNCTION_NAME}" --region "${AWS_REGION}" >/dev/null 2>&1; then

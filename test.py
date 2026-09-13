@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""Smoke-test the deployed hello-world API (API Gateway -> Lambda).
+"""Smoke-test the deployed hello-world API (API Gateway -> orchestrator Lambda
+-> async inference Lambda).
 
 Usage:
     python test.py
@@ -8,6 +9,9 @@ Usage:
 
 With no arguments it reads INVOKE_URL / API_KEY_ID from lambda_output.env,
 the artifact the Jenkins pipeline writes after a deploy.
+
+The orchestrator only kicks off the inference Lambda asynchronously and hands
+back a request_id, so this polls `?request_id=...` until the result is ready.
 """
 
 #python test.py --url "https://pi0wh7lzll.execute-api.us-east-1.amazonaws.com/prod/hello" --api-key-id 3utzzidxo3
@@ -15,6 +19,7 @@ import argparse
 import json
 import os
 import sys
+import time
 import urllib.error
 import urllib.request
 
@@ -70,29 +75,41 @@ def main():
             sys.exit("No API key: pass --api-key-value, or --api-key-id (to look it up via boto3).")
         api_key_value = resolve_api_key_value(args.api_key_id, args.region)
 
-    request = urllib.request.Request(args.url, headers={"x-api-key": api_key_value})
+    def get(url):
+        request = urllib.request.Request(url, headers={"x-api-key": api_key_value})
+        print(f"GET {url}")
+        try:
+            with urllib.request.urlopen(request, timeout=15) as response:
+                status, body = response.status, response.read().decode("utf-8")
+        except urllib.error.HTTPError as e:
+            status, body = e.code, e.read().decode("utf-8")
+        print(f"Status: {status}")
+        print(f"Body:   {body}")
+        try:
+            payload = json.loads(body)
+        except ValueError:
+            payload = None
+        return status, payload
 
-    print(f"GET {args.url}")
-    try:
-        with urllib.request.urlopen(request, timeout=15) as response:
-            status = response.status
-            body = response.read().decode("utf-8")
-    except urllib.error.HTTPError as e:
-        status = e.code
-        body = e.read().decode("utf-8")
+    status, payload = get(args.url)
+    if status != 200 or not isinstance(payload, dict) or not payload.get("request_id"):
+        print("FAIL: orchestrator didn't accept the job")
+        sys.exit(1)
 
-    print(f"Status: {status}")
-    print(f"Body:   {body}")
+    request_id = payload["request_id"]
+    poll_url = f"{args.url}?request_id={request_id}"
 
-    try:
-        payload = json.loads(body)
-    except ValueError:
-        payload = None
+    for attempt in range(20):
+        status, payload = get(poll_url)
+        if status == 200 and isinstance(payload, dict) and payload.get("status") == "done":
+            break
+        time.sleep(3)
+    else:
+        print("FAIL: inference Lambda didn't finish in time")
+        sys.exit(1)
 
     if (
-        status == 200
-        and isinstance(payload, dict)
-        and payload.get("message") == "Hello World new test"
+        payload.get("message") == "Hello World new test"
         and isinstance(payload.get("dummy_data"), list)
         and len(payload["dummy_data"]) > 0
     ):
