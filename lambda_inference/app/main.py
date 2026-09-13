@@ -2,6 +2,7 @@ import io
 import json
 import logging
 import os
+import time
 
 import boto3
 import openpyxl
@@ -42,6 +43,10 @@ def handler(event, context):
     # to poll.
     request_id = event["request_id"]
     log_stage(f"STAGE 6: inference Lambda invoked asynchronously, request_id={request_id}")
+
+    # TEMP: artificial delay to prove the orchestrator/inference split survives
+    # work slower than API Gateway's 30s integration timeout. Remove once verified.
+    time.sleep(120)
 
     log_stage(f"STAGE 7: reading dummy_data.xlsx from S3, request_id={request_id}")
     dummy_data = read_dummy_data()
