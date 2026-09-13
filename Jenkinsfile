@@ -108,7 +108,7 @@ pipeline {
                         # A freshly created API key / usage-plan link can take a while to
                         # propagate, so the first call(s) may 403 — retry with backoff instead
                         # of failing immediately.
-                        START_RESPONSE=$(curl --retry 15 --retry-delay 5 --retry-all-errors -sf -H "x-api-key: ${API_KEY_VALUE}" "${INVOKE_URL}")
+                        START_RESPONSE=$(curl -X POST --retry 15 --retry-delay 5 --retry-all-errors -sf -H "x-api-key: ${API_KEY_VALUE}" "${INVOKE_URL}")
                         echo "Start response: ${START_RESPONSE}"
                         REQUEST_ID=$(echo "${START_RESPONSE}" | grep -oP "\\"request_id\\"\\s*:\\s*\\"\\K[^\\"]+" || true)
                         [ -n "${REQUEST_ID}" ] || { echo "No request_id in orchestrator response"; exit 1; }

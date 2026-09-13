@@ -31,26 +31,30 @@ if [ -z "${RESOURCE_ID}" ] || [ "${RESOURCE_ID}" == "None" ]; then
   RESOURCE_ID="$(aws apigateway create-resource --rest-api-id "${API_ID}" --parent-id "${ROOT_ID}" --path-part hello --region "${AWS_REGION}" --query 'id' --output text)"
 fi
 
-echo "==> Configuring GET /hello (API key required, Lambda proxy integration)"
-aws apigateway put-method \
-  --rest-api-id "${API_ID}" --resource-id "${RESOURCE_ID}" \
-  --http-method GET --authorization-type NONE --api-key-required \
-  --region "${AWS_REGION}" >/dev/null 2>&1 || true
+echo "==> Configuring POST /hello (start job) and GET /hello (poll result) — both API key required, Lambda proxy integration"
+# POST starts a new job (side-effecting, not idempotent); GET polls S3 for an
+# existing job's result (read-only, safe, idempotent). Both proxy to the same
+# orchestrator Lambda, which dispatches on HTTP method internally.
+for METHOD in POST GET; do
+  aws apigateway put-method \
+    --rest-api-id "${API_ID}" --resource-id "${RESOURCE_ID}" \
+    --http-method "${METHOD}" --authorization-type NONE --api-key-required \
+    --region "${AWS_REGION}" >/dev/null 2>&1 || true
 
-aws apigateway put-integration \
-  --rest-api-id "${API_ID}" --resource-id "${RESOURCE_ID}" \
-  --http-method GET --type AWS_PROXY --integration-http-method POST \
-  --uri "arn:aws:apigateway:${AWS_REGION}:lambda:path/2015-03-31/functions/${LAMBDA_ARN}/invocations" \
-  --region "${AWS_REGION}" >/dev/null
+  aws apigateway put-integration \
+    --rest-api-id "${API_ID}" --resource-id "${RESOURCE_ID}" \
+    --http-method "${METHOD}" --type AWS_PROXY --integration-http-method POST \
+    --uri "arn:aws:apigateway:${AWS_REGION}:lambda:path/2015-03-31/functions/${LAMBDA_ARN}/invocations" \
+    --region "${AWS_REGION}" >/dev/null
 
-echo "==> Granting API Gateway permission to invoke Lambda"
-aws lambda add-permission \
-  --function-name "${FUNCTION_NAME}" \
-  --statement-id "apigateway-invoke-${API_ID}" \
-  --action lambda:InvokeFunction \
-  --principal apigateway.amazonaws.com \
-  --source-arn "arn:aws:execute-api:${AWS_REGION}:${AWS_ACCOUNT_ID}:${API_ID}/*/GET/hello" \
-  --region "${AWS_REGION}" >/dev/null 2>&1 || true
+  aws lambda add-permission \
+    --function-name "${FUNCTION_NAME}" \
+    --statement-id "apigateway-invoke-${API_ID}-${METHOD}" \
+    --action lambda:InvokeFunction \
+    --principal apigateway.amazonaws.com \
+    --source-arn "arn:aws:execute-api:${AWS_REGION}:${AWS_ACCOUNT_ID}:${API_ID}/*/${METHOD}/hello" \
+    --region "${AWS_REGION}" >/dev/null 2>&1 || true
+done
 
 echo "==> Deploying API stage '${STAGE_NAME}'"
 aws apigateway create-deployment --rest-api-id "${API_ID}" --stage-name "${STAGE_NAME}" --region "${AWS_REGION}" >/dev/null

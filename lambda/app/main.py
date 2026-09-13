@@ -2,7 +2,6 @@ import json
 import logging
 import os
 import uuid
-from typing import Optional
 
 import boto3
 from botocore.exceptions import ClientError
@@ -63,20 +62,23 @@ def get_result(request_id: str):
     return json.loads(obj["Body"].read())
 
 
+@app.post("/hello")
+def start_hello():
+    # Creates a new inference job (side effect: invokes another Lambda, will
+    # eventually write to S3) and isn't idempotent — every call spawns a new
+    # request_id — so this is POST, not GET.
+    log_stage("STAGE 1: API Gateway called orchestrator Lambda (start job)")
+    new_request_id = start_inference()
+    return {
+        "message": "Hello World new test",
+        "status": "processing",
+        "request_id": new_request_id,
+    }
+
+
 @app.get("/hello")
-def hello(request_id: Optional[str] = None):
-    log_stage("STAGE 1: API Gateway called orchestrator Lambda")
-
-    # No request_id yet: kick off a new inference job and hand back its id.
-    if not request_id:
-        new_request_id = start_inference()
-        return {
-            "message": "Hello World new test",
-            "status": "processing",
-            "request_id": new_request_id,
-        }
-
-    # request_id given: report whatever the inference Lambda has written so far.
+def poll_hello(request_id: str):
+    # Read-only, safe, idempotent, cacheable: GET fits.
     log_stage(f"STAGE 4: orchestrator polling S3 for result, request_id={request_id}")
     return get_result(request_id)
 

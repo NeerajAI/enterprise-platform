@@ -75,9 +75,9 @@ def main():
             sys.exit("No API key: pass --api-key-value, or --api-key-id (to look it up via boto3).")
         api_key_value = resolve_api_key_value(args.api_key_id, args.region)
 
-    def get(url):
-        request = urllib.request.Request(url, headers={"x-api-key": api_key_value})
-        print(f"GET {url}")
+    def call(url, method="GET"):
+        request = urllib.request.Request(url, headers={"x-api-key": api_key_value}, method=method)
+        print(f"{method} {url}")
         try:
             with urllib.request.urlopen(request, timeout=15) as response:
                 status, body = response.status, response.read().decode("utf-8")
@@ -91,7 +91,8 @@ def main():
             payload = None
         return status, payload
 
-    status, payload = get(args.url)
+    # Starting a job is a side-effecting, non-idempotent action -> POST.
+    status, payload = call(args.url, method="POST")
     if status != 200 or not isinstance(payload, dict) or not payload.get("request_id"):
         print("FAIL: orchestrator didn't accept the job")
         sys.exit(1)
@@ -99,8 +100,9 @@ def main():
     request_id = payload["request_id"]
     poll_url = f"{args.url}?request_id={request_id}"
 
+    # Polling for a result is read-only and idempotent -> GET.
     for attempt in range(60):
-        status, payload = get(poll_url)
+        status, payload = call(poll_url, method="GET")
         if status == 200 and isinstance(payload, dict) and payload.get("status") == "done":
             break
         time.sleep(5)

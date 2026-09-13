@@ -32,13 +32,14 @@ Jenkins (running on AWS EC2)
       |       - create/update the orchestrator Lambda function
       |
       +-- Stage 4: Deploy API Gateway
-      |       - create REST API + /hello GET route
+      |       - create REST API + POST /hello (start job) and GET /hello
+      |         (poll result) routes
       |       - Lambda proxy integration (points at the orchestrator)
-      |       - require an API key on the route
+      |       - require an API key on both routes
       |       - attach a usage plan (throttling + quota, for tracking)
       |
       +-- Stage 5: Smoke Test
-              - call /hello, get back a request_id, poll /hello?request_id=...
+              - POST /hello, get back a request_id, GET /hello?request_id=...
                 until the inference Lambda's result is ready, confirm it
                 includes the "Hello World" message and the rows read from
                 the Excel file in S3
@@ -58,20 +59,24 @@ Lambda would eventually take. To stay safely under that regardless of how
 slow the actual work gets, the work is split across two Lambdas:
 
 - **`hello-world-lambda` (orchestrator)** — sits behind API Gateway. On
-  `GET /hello` (no `request_id`), it generates a `request_id`, invokes the
-  inference Lambda **asynchronously** (`InvocationType="Event"` — returns as
-  soon as AWS accepts the invoke, without waiting for it to finish), and
-  immediately replies `{"status": "processing", "request_id": ...}`. On
+  `POST /hello`, it generates a `request_id`, invokes the inference Lambda
+  **asynchronously** (`InvocationType="Event"` — returns as soon as AWS
+  accepts the invoke, without waiting for it to finish), and immediately
+  replies `{"status": "processing", "request_id": ...}`. On
   `GET /hello?request_id=...`, it instead checks S3 for that request's result
   and returns it (or `{"status": "processing"}` if it isn't there yet).
+  POST is used to start the job because it creates a resource and has a side
+  effect (it isn't idempotent — two calls spawn two jobs); GET is used to
+  poll because it's read-only, safe, idempotent, and cacheable.
 - **`hello-world-inference-lambda` (inference)** — does the actual work that
   used to run inline: downloads `dummy_data.xlsx` from S3, reads its rows,
   and writes the result to `s3://<bucket>/results/<request_id>.json`. Nothing
   is waiting on its return value, so it's free to take as long as it needs
   (its own Lambda timeout is 60s, independent of API Gateway's 30s limit).
 
-Callers therefore poll: call `/hello` to kick off a job, then call
-`/hello?request_id=<id>` (see `test.py`) until `status` comes back `"done"`.
+Callers therefore poll: `POST /hello` to kick off a job, then
+`GET /hello?request_id=<id>` (see `test.py`) until `status` comes back
+`"done"`.
 
 ### Infrastructure as code — or lack thereof
 
@@ -107,7 +112,7 @@ app still uses the direct-invoke design described above.
 
 | Path | Purpose |
 |---|---|
-| `lambda/app/main.py` | Orchestrator: FastAPI app with `GET /hello` → starts an async inference job (or polls S3 for its result if given `request_id`), wrapped with [Mangum](https://github.com/jordaneremieff/mangum) so it runs on Lambda |
+| `lambda/app/main.py` | Orchestrator: FastAPI app — `POST /hello` starts an async inference job, `GET /hello?request_id=...` polls S3 for its result — wrapped with [Mangum](https://github.com/jordaneremieff/mangum) so it runs on Lambda |
 | `lambda/app/requirements.txt` | Orchestrator Python deps (`fastapi`, `mangum`, `boto3`) |
 | `lambda/Dockerfile` | Orchestrator Lambda container image, based on `public.ecr.aws/lambda/python:3.12` |
 | `lambda_inference/app/main.py` | Inference Lambda: plain `handler(event, context)` invoked asynchronously by the orchestrator — reads the Excel file from S3 and writes the result to `s3://<bucket>/results/<request_id>.json` |
@@ -211,6 +216,7 @@ as `enterprise-bucket-<aws-account-id>` (see `infra/deploy_s3.sh`).
 
 Live endpoint (from the `dev` build): `https://pi0wh7lzll.execute-api.us-east-1.amazonaws.com/prod/hello`
 (requires an `x-api-key` header — see the API key created by `infra/deploy_api_gateway.sh`).
+`POST` to it to start a job, `GET` it with `?request_id=...` to poll the result.
 
 ### Fixes that got the pipeline green
 
@@ -228,3 +234,10 @@ Live endpoint (from the `dev` build): `https://pi0wh7lzll.execute-api.us-east-1.
   link was still propagating, even though the config was correct (confirmed
   by re-curling the same URL/key manually a few minutes later — 200 OK).
   Widened to `--retry 15 --retry-delay 5` (~75s of headroom).
+- **GET/POST split**: starting a job used to be `GET /hello` with no
+  `request_id`, which isn't idempotent (two identical calls create two jobs)
+  and has a side effect (invoking the inference Lambda) — not a safe/cacheable
+  GET by REST convention. Split into `POST /hello` (start a job) and
+  `GET /hello?request_id=...` (poll a result, unchanged). API Gateway now
+  provisions both methods on the `/hello` resource, both proxying to the same
+  orchestrator Lambda, which dispatches on the two FastAPI routes internally.
