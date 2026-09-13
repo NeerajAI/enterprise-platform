@@ -214,7 +214,7 @@ Requested name was `EnterpriseBucket`, but S3 bucket names must be lowercase
 and globally unique across all AWS accounts, so the actual name is computed
 as `enterprise-bucket-<aws-account-id>` (see `infra/deploy_s3.sh`).
 
-Live endpoint (from the `dev` build): `https://pi0wh7lzll.execute-api.us-east-1.amazonaws.com/prod/hello`
+Live endpoint (from the `dev` build, #39): `https://ktn3wx7mc7.execute-api.us-east-1.amazonaws.com/prod/hello`
 (requires an `x-api-key` header — see the API key created by `infra/deploy_api_gateway.sh`).
 `POST` to it to start a job, `GET` it with `?request_id=...` to poll the result.
 
