@@ -46,7 +46,7 @@ def handler(event, context):
 
     # TEMP: artificial delay to prove the orchestrator/inference split survives
     # work slower than API Gateway's 30s integration timeout. Remove once verified.
-    time.sleep(120)
+    time.sleep(35)
 
     log_stage(f"STAGE 7: reading dummy_data.xlsx from S3, request_id={request_id}")
     dummy_data = read_dummy_data()
