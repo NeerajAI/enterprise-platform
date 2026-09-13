@@ -6,6 +6,8 @@ usage plan for tracking/throttling).
 
 ## Architecture
 
+![Architecture diagram: Jenkins on EC2 builds and pushes two Lambda images to ECR and deploys the orchestrator Lambda, inference Lambda, S3 bucket, and API Gateway; at request time a client calls API Gateway, which invokes the orchestrator Lambda, which invokes the inference Lambda asynchronously, which reads/writes S3, while the orchestrator polls S3 for the result.](docs/architecture.svg)
+
 ```
 GitHub (this repo)
       |
@@ -97,6 +99,7 @@ resources or environments.
 | `infra/deploy_lambda.sh` | Builds the orchestrator image, pushes to ECR, creates/updates the orchestrator Lambda function and its execution role (S3 read + permission to invoke the inference Lambda) |
 | `infra/deploy_api_gateway.sh` | Creates/updates the REST API, `/hello` route, API key, and usage plan |
 | `Jenkinsfile` | Declarative pipeline wiring the above stages together |
+| `docs/architecture.svg` | Architecture diagram embedded above |
 
 ## Branch strategy
 
