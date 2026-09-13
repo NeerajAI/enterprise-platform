@@ -119,14 +119,14 @@ pipeline {
                         # runs with set -e, so an unguarded failure on any single poll attempt
                         # (a transient non-2xx, or no match in the JSON yet) would kill this whole
                         # script instead of letting the loop retry.
-                        for i in $(seq 1 20); do
+                        for i in $(seq 1 60); do
                             RESULT=$(curl -s -H "x-api-key: ${API_KEY_VALUE}" "${INVOKE_URL}?request_id=${REQUEST_ID}" || true)
                             STATUS=$(echo "${RESULT}" | grep -oP "\\"status\\"\\s*:\\s*\\"\\K[^\\"]+" || true)
                             if [ "${STATUS}" = "done" ]; then
                                 echo "Result: ${RESULT}"
                                 exit 0
                             fi
-                            sleep 3
+                            sleep 5
                         done
                         echo "Inference Lambda did not finish in time"
                         exit 1

@@ -72,7 +72,7 @@ if aws lambda get-function --function-name "${FUNCTION_NAME}" --region "${AWS_RE
   aws lambda update-function-configuration \
     --function-name "${FUNCTION_NAME}" \
     --environment "${LAMBDA_ENV_VARS}" \
-    --timeout 180 \
+    --timeout 600 \
     --region "${AWS_REGION}" >/dev/null
   aws lambda wait function-updated --function-name "${FUNCTION_NAME}" --region "${AWS_REGION}"
 else
@@ -81,7 +81,7 @@ else
     --package-type Image \
     --code ImageUri="${ECR_URI}:${IMAGE_TAG}" \
     --role "${ROLE_ARN}" \
-    --timeout 180 \
+    --timeout 600 \
     --memory-size 256 \
     --environment "${LAMBDA_ENV_VARS}" \
     --tags "${TAG_KEY}=${TAG_VALUE}" \

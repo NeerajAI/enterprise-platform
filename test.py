@@ -99,11 +99,11 @@ def main():
     request_id = payload["request_id"]
     poll_url = f"{args.url}?request_id={request_id}"
 
-    for attempt in range(20):
+    for attempt in range(60):
         status, payload = get(poll_url)
         if status == 200 and isinstance(payload, dict) and payload.get("status") == "done":
             break
-        time.sleep(3)
+        time.sleep(5)
     else:
         print("FAIL: inference Lambda didn't finish in time")
         sys.exit(1)
