@@ -26,7 +26,7 @@ Jenkins (running on AWS EC2)
       |       - build Docker image (lambda_inference/Dockerfile)
       |       - push image to ECR
       |       - grant the role s3:GetObject (source data) + s3:PutObject (results)
-      |         + SQS receive/delete on the job queue
+      |         + SQS receive/delete on the job queue + Bedrock InvokeModel
       |       - create/update the inference Lambda function
       |       - create/update the SQS event source mapping (queue -> Lambda)
       |
@@ -91,6 +91,31 @@ queue between them:
   Re-processing a message is safe because the result key is derived from the
   `request_id`.
 
+### Bedrock summary (Claude)
+
+After the inference Lambda has saved the result to S3, it makes a second call:
+it sends the Excel table (as a markdown table) to a Claude model on Amazon
+Bedrock through the `Converse` API and prints the model's summary to the
+Lambda's log. Look for the `STAGE 9` lines (and the `Bedrock summary of the
+table` entry between them) in the CloudWatch log group
+`/aws/lambda/hello-world-inference-lambda`.
+
+- **Model:** set by `BEDROCK_MODEL_ID` in the `Jenkinsfile` (currently
+  `us.anthropic.claude-haiku-5-5`). Because `Converse` is model-agnostic,
+  switching to another Claude model is just a change to that value.
+- **Failure behaviour:** the summary runs *after* the result is written, and a
+  Bedrock error (throttling, model access not granted) is logged but doesn't
+  fail the job. The API result is unaffected, and the message isn't retried
+  or sent to the dead-letter queue because of it.
+- **IAM:** `infra/deploy_inference_lambda.sh` gives the inference Lambda's role
+  `bedrock:InvokeModel` / `InvokeModelWithResponseStream` on foundation models
+  and this account's inference profiles. No new permission is needed on the
+  `jenkins-ci` user (it already has `iam:PutRolePolicy` on that role).
+- **One-time account setup:** Anthropic models on Bedrock need a one-time
+  use-case form submitted in the Bedrock console before the first call
+  succeeds (open the model in the console's playground once). Until then the
+  summary step logs an `AccessDeniedException`.
+
 Callers therefore poll: `POST /hello` to kick off a job, then
 `GET /hello?request_id=<id>` (see `test.py`) until `status` comes back
 `"done"`.
@@ -112,13 +137,13 @@ resources or environments.
 | `lambda/app/main.py` | Orchestrator: FastAPI app — `POST /hello` starts an async inference job, `GET /hello?request_id=...` polls S3 for its result — wrapped with [Mangum](https://github.com/jordaneremieff/mangum) so it runs on Lambda |
 | `lambda/app/requirements.txt` | Orchestrator Python deps (`fastapi`, `mangum`, `boto3`) |
 | `lambda/Dockerfile` | Orchestrator Lambda container image, based on `public.ecr.aws/lambda/python:3.12` |
-| `lambda_inference/app/main.py` | Inference Lambda: plain `handler(event, context)` triggered by SQS messages from the orchestrator — reads the Excel file from S3 and writes the result to `s3://<bucket>/results/<request_id>.json` |
+| `lambda_inference/app/main.py` | Inference Lambda: plain `handler(event, context)` triggered by SQS messages from the orchestrator — reads the Excel file from S3, writes the result to `s3://<bucket>/results/<request_id>.json`, then asks Claude on Bedrock to summarize the table and prints the summary to the log |
 | `lambda_inference/app/requirements.txt` | Inference Lambda Python deps (`boto3`, `openpyxl`) |
 | `lambda_inference/Dockerfile` | Inference Lambda container image |
 | `data/dummy_data.xlsx` | Dummy Excel data uploaded to S3 and read by the inference Lambda on each job |
 | `infra/deploy_s3.sh` | Creates/updates the S3 tracking bucket and uploads `data/dummy_data.xlsx` to it |
 | `infra/deploy_sqs.sh` | Creates/updates the SQS job queue and its dead-letter queue (tagged `AI: AI`) |
-| `infra/deploy_inference_lambda.sh` | Builds the inference image, pushes to ECR, creates/updates the inference Lambda function and its execution role (S3 read + write, SQS consume) and the SQS event source mapping |
+| `infra/deploy_inference_lambda.sh` | Builds the inference image, pushes to ECR, creates/updates the inference Lambda function and its execution role (S3 read + write, SQS consume, Bedrock invoke) and the SQS event source mapping |
 | `infra/deploy_lambda.sh` | Builds the orchestrator image, pushes to ECR, creates/updates the orchestrator Lambda function and its execution role (S3 read + `sqs:SendMessage` on the job queue) |
 | `infra/deploy_api_gateway.sh` | Creates/updates the REST API, `/hello` route, API key, and usage plan |
 | `Jenkinsfile` | Declarative pipeline wiring the above stages together |

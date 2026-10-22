@@ -9,6 +9,9 @@ pipeline {
         INFERENCE_ECR_REPO_NAME        = 'hello-world-inference-lambda'
         INFERENCE_LAMBDA_FUNCTION_NAME = 'hello-world-inference-lambda'
         RESULTS_PREFIX       = 'results/'
+        // Claude model (or cross-region inference profile) on Bedrock that the
+        // inference Lambda uses to summarize the Excel table.
+        BEDROCK_MODEL_ID     = 'us.anthropic.claude-haiku-5-5'
         // Queue between the orchestrator and inference Lambdas; its dead-letter
         // queue is named "<SQS_QUEUE_NAME>-dlq".
         SQS_QUEUE_NAME       = 'hello-world-jobs'

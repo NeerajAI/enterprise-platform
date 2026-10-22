@@ -14,6 +14,10 @@ ROLE_NAME="${INFERENCE_LAMBDA_ROLE_NAME:-hello-world-inference-lambda-role}"
 ECR_URI="${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/${ECR_REPO_NAME}"
 RESULTS_PREFIX="${RESULTS_PREFIX:-results/}"
 RESERVED_CONCURRENCY="${INFERENCE_LAMBDA_RESERVED_CONCURRENCY:-10}"
+# Bedrock model (or cross-region inference profile) used to summarize the table.
+# The account must have access to it: Anthropic models need a one-time use-case
+# form submitted in the Bedrock console before the first call succeeds.
+BEDROCK_MODEL_ID="${BEDROCK_MODEL_ID:-us.anthropic.claude-haiku-5-5}"
 # Keep in sync with the queue's visibility timeout (6x this), set in infra/deploy_sqs.sh.
 LAMBDA_TIMEOUT="${INFERENCE_LAMBDA_TIMEOUT:-600}"
 # Caps how many inference invocations the queue can run in parallel. Kept below the
@@ -82,7 +86,17 @@ if [ -n "${SQS_QUEUE_ARN:-}" ]; then
     --policy-document "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"Allow\",\"Action\":[\"sqs:ReceiveMessage\",\"sqs:DeleteMessage\",\"sqs:GetQueueAttributes\"],\"Resource\":\"${SQS_QUEUE_ARN}\"}]}"
 fi
 
-LAMBDA_ENV_VARS="Variables={BUCKET_NAME=${S3_BUCKET_NAME:-},OBJECT_KEY=${S3_OBJECT_KEY:-dummy_data.xlsx},RESULTS_PREFIX=${RESULTS_PREFIX}}"
+# Lets the inference Lambda call Claude on Bedrock to summarize the table. The Converse
+# API is authorized as bedrock:InvokeModel. Both resource types are needed: a
+# cross-region inference profile ID (e.g. "us.anthropic.…") is checked against the
+# profile in this account AND the underlying foundation models in each region it
+# routes to, hence the wildcard region on the foundation-model ARN.
+echo "==> Granting inference Lambda role permission to invoke Bedrock model '${BEDROCK_MODEL_ID}'"
+aws iam put-role-policy --role-name "${ROLE_NAME}" \
+  --policy-name "bedrock-invoke" \
+  --policy-document "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"Allow\",\"Action\":[\"bedrock:InvokeModel\",\"bedrock:InvokeModelWithResponseStream\"],\"Resource\":[\"arn:aws:bedrock:*::foundation-model/*\",\"arn:aws:bedrock:*:${AWS_ACCOUNT_ID}:inference-profile/*\"]}]}"
+
+LAMBDA_ENV_VARS="Variables={BUCKET_NAME=${S3_BUCKET_NAME:-},OBJECT_KEY=${S3_OBJECT_KEY:-dummy_data.xlsx},RESULTS_PREFIX=${RESULTS_PREFIX},BEDROCK_MODEL_ID=${BEDROCK_MODEL_ID}}"
 
 echo "==> Creating or updating inference Lambda function '${FUNCTION_NAME}'"
 if aws lambda get-function --function-name "${FUNCTION_NAME}" --region "${AWS_REGION}" >/dev/null 2>&1; then
