@@ -17,7 +17,7 @@ RESERVED_CONCURRENCY="${INFERENCE_LAMBDA_RESERVED_CONCURRENCY:-10}"
 # Bedrock model (or cross-region inference profile) used to summarize the table.
 # The account must have access to it: Anthropic models need a one-time use-case
 # form submitted in the Bedrock console before the first call succeeds.
-BEDROCK_MODEL_ID="${BEDROCK_MODEL_ID:-anthropic.claude-sonnet-4-6}"
+BEDROCK_MODEL_ID="${BEDROCK_MODEL_ID:-us.anthropic.claude-sonnet-4-6}"
 # Keep in sync with the queue's visibility timeout (6x this), set in infra/deploy_sqs.sh.
 LAMBDA_TIMEOUT="${INFERENCE_LAMBDA_TIMEOUT:-600}"
 # Caps how many inference invocations the queue can run in parallel. Kept below the

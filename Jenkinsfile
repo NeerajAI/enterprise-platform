@@ -11,7 +11,7 @@ pipeline {
         RESULTS_PREFIX       = 'results/'
         // Claude model (or cross-region inference profile) on Bedrock that the
         // inference Lambda uses to summarize the Excel table.
-        BEDROCK_MODEL_ID     = 'anthropic.claude-sonnet-4-6'
+        BEDROCK_MODEL_ID     = 'us.anthropic.claude-sonnet-4-6'
         // Queue between the orchestrator and inference Lambdas; its dead-letter
         // queue is named "<SQS_QUEUE_NAME>-dlq".
         SQS_QUEUE_NAME       = 'hello-world-jobs'
