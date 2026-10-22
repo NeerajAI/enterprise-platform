@@ -35,13 +35,8 @@ def read_dummy_data():
     return [dict(zip(header, row)) for row in data_rows]
 
 
-def handler(event, context):
-    # Invoked asynchronously (InvocationType="Event") by the orchestrator
-    # Lambda, so there's no caller waiting on this return value — the result
-    # is handed off via S3 instead, keyed by request_id for the orchestrator
-    # to poll.
-    request_id = event["request_id"]
-    log_stage(f"STAGE 6: inference Lambda invoked asynchronously, request_id={request_id}")
+def process(request_id: str) -> None:
+    log_stage(f"STAGE 6: inference Lambda triggered by SQS message, request_id={request_id}")
 
     log_stage(f"STAGE 7: reading dummy_data.xlsx from S3, request_id={request_id}")
     dummy_data = read_dummy_data()
@@ -62,3 +57,16 @@ def handler(event, context):
         ContentType="application/json",
     )
     log_stage(f"STAGE 8 done: result written to S3, request_id={request_id}")
+
+
+def handler(event, context):
+    # Triggered by the SQS event source mapping (batch size 1), so there's no
+    # caller waiting on this return value — the result is handed off via S3
+    # instead, keyed by request_id for the orchestrator to poll.
+    #
+    # If anything raises, the message isn't deleted: it becomes visible again after
+    # the queue's visibility timeout and is retried, and after maxReceiveCount
+    # failed attempts SQS moves it to the dead-letter queue. Re-processing is safe
+    # because the result is written to a key derived from request_id (idempotent).
+    for record in event["Records"]:
+        process(json.loads(record["body"])["request_id"])

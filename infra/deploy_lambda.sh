@@ -16,10 +16,10 @@ if [ -f s3_output.env ]; then
   . ./s3_output.env
 fi
 
-# Populated by infra/deploy_inference_lambda.sh (run earlier in the pipeline) so
-# this orchestrator knows which inference Lambda to invoke asynchronously.
-if [ -f inference_lambda_output.env ]; then
-  . ./inference_lambda_output.env
+# Populated by infra/deploy_sqs.sh (run earlier in the pipeline) so this
+# orchestrator knows which queue to send inference jobs to.
+if [ -f sqs_output.env ]; then
+  . ./sqs_output.env
 fi
 
 # Every resource this pipeline creates is tagged AI=true so it can be found and torn down later.
@@ -64,14 +64,19 @@ if [ -n "${S3_BUCKET_NAME:-}" ]; then
     --policy-document "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"Allow\",\"Action\":\"s3:GetObject\",\"Resource\":\"arn:aws:s3:::${S3_BUCKET_NAME}/*\"}]}"
 fi
 
-if [ -n "${INFERENCE_LAMBDA_FUNCTION_ARN:-}" ]; then
-  echo "==> Granting Lambda role permission to invoke '${INFERENCE_LAMBDA_FUNCTION_NAME}' asynchronously"
+if [ -n "${SQS_QUEUE_ARN:-}" ]; then
+  echo "==> Granting Lambda role permission to send messages to '${SQS_QUEUE_NAME}'"
   aws iam put-role-policy --role-name "${ROLE_NAME}" \
-    --policy-name "invoke-${INFERENCE_LAMBDA_FUNCTION_NAME}" \
-    --policy-document "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"Allow\",\"Action\":\"lambda:InvokeFunction\",\"Resource\":\"${INFERENCE_LAMBDA_FUNCTION_ARN}\"}]}"
+    --policy-name "sqs-send-${SQS_QUEUE_NAME}" \
+    --policy-document "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"Allow\",\"Action\":\"sqs:SendMessage\",\"Resource\":\"${SQS_QUEUE_ARN}\"}]}"
 fi
 
-LAMBDA_ENV_VARS="Variables={BUCKET_NAME=${S3_BUCKET_NAME:-},OBJECT_KEY=${S3_OBJECT_KEY:-dummy_data.xlsx},RESULTS_PREFIX=${RESULTS_PREFIX:-results/},INFERENCE_LAMBDA_NAME=${INFERENCE_LAMBDA_FUNCTION_NAME:-}}"
+# The orchestrator used to invoke the inference Lambda directly; it now hands jobs
+# off through SQS instead, so drop the leftover invoke permission (best-effort).
+aws iam delete-role-policy --role-name "${ROLE_NAME}" \
+  --policy-name "invoke-${INFERENCE_LAMBDA_FUNCTION_NAME:-hello-world-inference-lambda}" >/dev/null 2>&1 || true
+
+LAMBDA_ENV_VARS="Variables={BUCKET_NAME=${S3_BUCKET_NAME:-},OBJECT_KEY=${S3_OBJECT_KEY:-dummy_data.xlsx},RESULTS_PREFIX=${RESULTS_PREFIX:-results/},SQS_QUEUE_URL=${SQS_QUEUE_URL:-}}"
 
 echo "==> Creating or updating Lambda function '${FUNCTION_NAME}'"
 if aws lambda get-function --function-name "${FUNCTION_NAME}" --region "${AWS_REGION}" >/dev/null 2>&1; then

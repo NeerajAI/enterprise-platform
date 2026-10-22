@@ -6,7 +6,7 @@ usage plan for tracking/throttling).
 
 ## Architecture
 
-![Architecture diagram: Jenkins on EC2 builds and pushes two Lambda images to ECR and deploys the orchestrator Lambda, inference Lambda, S3 bucket, and API Gateway; at request time a client calls API Gateway, which invokes the orchestrator Lambda, which invokes the inference Lambda asynchronously, which reads/writes S3, while the orchestrator polls S3 for the result.](docs/architecture.svg)
+![Architecture diagram: Jenkins on EC2 builds and pushes two Lambda images to ECR and deploys the orchestrator Lambda, SQS queue and dead-letter queue, inference Lambda, S3 bucket, and API Gateway; at request time a client calls API Gateway, which invokes the orchestrator Lambda, which sends a message to the SQS queue; the queue triggers the inference Lambda, which reads/writes S3, while the orchestrator polls S3 for the result. Messages that fail repeatedly move to the dead-letter queue.](docs/architecture.svg)
 
 ```
 GitHub (this repo)
@@ -18,61 +18,78 @@ Jenkins (running on AWS EC2)
       |       - create the tracking bucket (enterprise-bucket-<account-id>)
       |       - upload data/dummy_data.xlsx into it
       |
-      +-- Stage 2: Build & Deploy Inference Lambda
+      +-- Stage 2: Deploy SQS Queues
+      |       - create the job queue (hello-world-jobs) and its dead-letter
+      |         queue (hello-world-jobs-dlq), tagged AI: AI
+      |
+      +-- Stage 3: Build & Deploy Inference Lambda
       |       - build Docker image (lambda_inference/Dockerfile)
       |       - push image to ECR
       |       - grant the role s3:GetObject (source data) + s3:PutObject (results)
+      |         + SQS receive/delete on the job queue
       |       - create/update the inference Lambda function
+      |       - create/update the SQS event source mapping (queue -> Lambda)
       |
-      +-- Stage 3: Build & Deploy Lambda (orchestrator)
+      +-- Stage 4: Build & Deploy Lambda (orchestrator)
       |       - build Docker image (lambda/Dockerfile)
       |       - push image to ECR
-      |       - grant the role s3:GetObject on the bucket + lambda:InvokeFunction
-      |         on the inference Lambda
+      |       - grant the role s3:GetObject on the bucket + sqs:SendMessage
+      |         on the job queue
       |       - create/update the orchestrator Lambda function
       |
-      +-- Stage 4: Deploy API Gateway
+      +-- Stage 5: Deploy API Gateway
       |       - create REST API + POST /hello (start job) and GET /hello
       |         (poll result) routes
       |       - Lambda proxy integration (points at the orchestrator)
       |       - require an API key on both routes
       |       - attach a usage plan (throttling + quota, for tracking)
       |
-      +-- Stage 5: Smoke Test
+      +-- Stage 6: Smoke Test
               - POST /hello, get back a request_id, GET /hello?request_id=...
                 until the inference Lambda's result is ready, confirm it
                 includes the "Hello World" message and the rows read from
                 the Excel file in S3
 ```
 
-Order matters: the S3 bucket must exist before either Lambda is deployed (so
-its name/IAM policy can be wired in), the inference Lambda must exist before
-the orchestrator (so the orchestrator's role can be granted `InvokeFunction`
-on it), and the orchestrator must exist before API Gateway can create an
-integration pointing at it.
+Order matters: the S3 bucket and the SQS queues must exist before either
+Lambda is deployed (so their names/ARNs and IAM policies can be wired in), the
+inference Lambda is deployed before the orchestrator so the queue has a
+consumer by the time jobs start arriving, and the orchestrator must exist
+before API Gateway can create an integration pointing at it.
 
-### Two Lambdas: orchestrator + inference
+### Two Lambdas + an SQS queue between them
 
 API Gateway enforces a hard 30s integration timeout — if the backing Lambda
 hasn't responded by then, it just returns a 504, no matter how long the
 Lambda would eventually take. To stay safely under that regardless of how
-slow the actual work gets, the work is split across two Lambdas:
+slow the actual work gets, the work is split across two Lambdas with an SQS
+queue between them:
 
 - **`hello-world-lambda` (orchestrator)** — sits behind API Gateway. On
-  `POST /hello`, it generates a `request_id`, invokes the inference Lambda
-  **asynchronously** (`InvocationType="Event"` — returns as soon as AWS
-  accepts the invoke, without waiting for it to finish), and immediately
-  replies `{"status": "processing", "request_id": ...}`. On
+  `POST /hello`, it generates a `request_id`, sends it as a message to the
+  SQS queue (returns as soon as SQS accepts the message, without waiting for
+  anything to process it), and immediately replies
+  `{"status": "processing", "request_id": ...}`. On
   `GET /hello?request_id=...`, it instead checks S3 for that request's result
   and returns it (or `{"status": "processing"}` if it isn't there yet).
   POST is used to start the job because it creates a resource and has a side
   effect (it isn't idempotent — two calls spawn two jobs); GET is used to
   poll because it's read-only, safe, idempotent, and cacheable.
+- **`hello-world-jobs` (SQS queue)** — buffers jobs between the two Lambdas.
+  The inference Lambda is triggered from it through an event source mapping
+  (batch size 1, concurrency capped at 5, so a burst of requests is smoothed
+  out instead of fanning out unbounded). Its visibility timeout is 3600s, 6x
+  the inference Lambda's 600s timeout, as SQS recommends.
+- **`hello-world-jobs-dlq` (dead-letter queue)** — if the inference Lambda
+  fails a message 5 times, SQS moves it here (kept for 14 days) instead of
+  dropping it, so a failed job can be inspected and redriven.
 - **`hello-world-inference-lambda` (inference)** — does the actual work that
   used to run inline: downloads `dummy_data.xlsx` from S3, reads its rows,
   and writes the result to `s3://<bucket>/results/<request_id>.json`. Nothing
   is waiting on its return value, so it's free to take as long as it needs
-  (its own Lambda timeout is 60s, independent of API Gateway's 30s limit).
+  (its own Lambda timeout is 600s, independent of API Gateway's 30s limit).
+  Re-processing a message is safe because the result key is derived from the
+  `request_id`.
 
 Callers therefore poll: `POST /hello` to kick off a job, then
 `GET /hello?request_id=<id>` (see `test.py`) until `status` comes back
@@ -80,33 +97,13 @@ Callers therefore poll: `POST /hello` to kick off a job, then
 
 ### Infrastructure as code — or lack thereof
 
-There's no CloudFormation, SAM, CDK, or Terraform here. `infra/deploy_lambda.sh`,
+There's no CloudFormation, SAM, CDK, or Terraform here. `infra/deploy_sqs.sh`, `infra/deploy_lambda.sh`,
 `infra/deploy_inference_lambda.sh`, and `infra/deploy_api_gateway.sh` are plain
 AWS CLI shell scripts that check whether each resource exists (`get-rest-apis`,
 `get-function`, etc.) and create it if not — hand-rolled idempotency instead of
 a declarative template engine managing state/diffs. Fine for a hello-world demo;
 worth revisiting (e.g. SAM or CDK) if this grows into something with more
 resources or environments.
-
-## Alternative option: SQS-decoupled inference (not implemented)
-
-The deployed architecture above has the orchestrator invoke the inference
-Lambda directly and asynchronously. That's simple, but it has two gaps: a
-failed invoke is silently dropped (Lambda's async retries exhaust with no
-record of what happened), and there's no ceiling on how many inference
-invocations can fan out at once.
-
-![Alternative architecture diagram: the orchestrator sends a message to an SQS queue instead of invoking the inference Lambda directly; the inference Lambda is triggered by the queue via an event source mapping; messages that fail repeatedly move to a dead-letter queue instead of being silently dropped.](docs/architecture-sqs-option.svg)
-
-Swapping the direct invoke for an SQS queue between the two Lambdas would
-fix both: the queue buffers and throttles the fan-out naturally, and a
-dead-letter queue captures any message the inference Lambda can't
-successfully process after repeated attempts, instead of it vanishing.
-Everything else — S3 for the result, the orchestrator's polling endpoint,
-the CI/CD pipeline — stays the same either way.
-
-This is presented as a second option, not implemented here — the deployed
-app still uses the direct-invoke design described above.
 
 ## Repo layout
 
@@ -115,17 +112,17 @@ app still uses the direct-invoke design described above.
 | `lambda/app/main.py` | Orchestrator: FastAPI app — `POST /hello` starts an async inference job, `GET /hello?request_id=...` polls S3 for its result — wrapped with [Mangum](https://github.com/jordaneremieff/mangum) so it runs on Lambda |
 | `lambda/app/requirements.txt` | Orchestrator Python deps (`fastapi`, `mangum`, `boto3`) |
 | `lambda/Dockerfile` | Orchestrator Lambda container image, based on `public.ecr.aws/lambda/python:3.12` |
-| `lambda_inference/app/main.py` | Inference Lambda: plain `handler(event, context)` invoked asynchronously by the orchestrator — reads the Excel file from S3 and writes the result to `s3://<bucket>/results/<request_id>.json` |
+| `lambda_inference/app/main.py` | Inference Lambda: plain `handler(event, context)` triggered by SQS messages from the orchestrator — reads the Excel file from S3 and writes the result to `s3://<bucket>/results/<request_id>.json` |
 | `lambda_inference/app/requirements.txt` | Inference Lambda Python deps (`boto3`, `openpyxl`) |
 | `lambda_inference/Dockerfile` | Inference Lambda container image |
 | `data/dummy_data.xlsx` | Dummy Excel data uploaded to S3 and read by the inference Lambda on each job |
 | `infra/deploy_s3.sh` | Creates/updates the S3 tracking bucket and uploads `data/dummy_data.xlsx` to it |
-| `infra/deploy_inference_lambda.sh` | Builds the inference image, pushes to ECR, creates/updates the inference Lambda function and its execution role (S3 read + write) |
-| `infra/deploy_lambda.sh` | Builds the orchestrator image, pushes to ECR, creates/updates the orchestrator Lambda function and its execution role (S3 read + permission to invoke the inference Lambda) |
+| `infra/deploy_sqs.sh` | Creates/updates the SQS job queue and its dead-letter queue (tagged `AI: AI`) |
+| `infra/deploy_inference_lambda.sh` | Builds the inference image, pushes to ECR, creates/updates the inference Lambda function and its execution role (S3 read + write, SQS consume) and the SQS event source mapping |
+| `infra/deploy_lambda.sh` | Builds the orchestrator image, pushes to ECR, creates/updates the orchestrator Lambda function and its execution role (S3 read + `sqs:SendMessage` on the job queue) |
 | `infra/deploy_api_gateway.sh` | Creates/updates the REST API, `/hello` route, API key, and usage plan |
 | `Jenkinsfile` | Declarative pipeline wiring the above stages together |
 | `docs/architecture.svg` | Architecture diagram embedded above |
-| `docs/architecture-sqs-option.svg` | Alternative (not implemented) SQS-decoupled architecture diagram |
 
 ## Branch strategy
 
@@ -135,8 +132,9 @@ app still uses the direct-invoke design described above.
 
 ## AWS resource tagging
 
-Every AWS resource the scripts create (S3 bucket, ECR repo, IAM role, Lambda
-function, REST API, API key, usage plan) is tagged `AI: AI`. This makes it
+Every AWS resource the scripts create (S3 bucket, SQS queue + dead-letter queue,
+Lambda event source mapping, ECR repo, IAM role, Lambda function, REST API, API
+key, usage plan) is tagged `AI: AI`. This makes it
 possible to find and bulk-delete everything this pipeline provisioned, as
 opposed to resources created by hand.
 
@@ -183,8 +181,9 @@ The pipeline needs one Jenkins credential:
 | Password | AWS Secret Access Key |
 | ID | `aws-jenkins-creds` (must match exactly — referenced by the Jenkinsfile) |
 
-The IAM user behind these keys needs permissions for ECR, Lambda, IAM (role
-create/attach), and API Gateway.
+The IAM user behind these keys needs permissions for ECR, Lambda (including
+event source mappings), IAM (role create/attach, `PutRolePolicy`), S3, SQS
+(create/tag/configure queues), and API Gateway.
 
 Add it under **Manage Jenkins → Credentials → System → Global → Add Credentials**.
 
@@ -193,7 +192,8 @@ Add it under **Manage Jenkins → Credentials → System → Global → Add Cred
 From the job page, click **Build Now**. Progress and logs are visible under
 **Console Output** for each build number. On success, the invoke URL and API key
 ID are written to `lambda_output.env`, the inference Lambda's name/ARN to
-`inference_lambda_output.env`, and both are archived as build artifacts.
+`inference_lambda_output.env`, the queue URLs/ARNs to `sqs_output.env`, and all
+are archived as build artifacts.
 
 ## Status
 

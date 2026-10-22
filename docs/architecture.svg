@@ -1,6 +1,6 @@
-<svg viewBox="0 0 1160 900" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Jenkins on EC2 builds and pushes two Lambda images to ECR and deploys the orchestrator Lambda, inference Lambda, S3 bucket and API Gateway; at request time a client calls API Gateway, which invokes the orchestrator Lambda, which invokes the inference Lambda asynchronously, which reads/writes S3, while the orchestrator polls S3 for the result.">
+<svg viewBox="0 0 1200 820" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Jenkins on EC2 builds and pushes two Lambda images to ECR and deploys the orchestrator Lambda, SQS queue with dead-letter queue, inference Lambda, S3 bucket and API Gateway; at request time a client calls API Gateway, which invokes the orchestrator Lambda, which sends a message to the SQS queue; the queue triggers the inference Lambda, which reads/writes S3, while the orchestrator polls S3 for the result. Messages the inference Lambda repeatedly fails on move to the dead-letter queue.">
   <title>enterprise-platform architecture</title>
-  <desc>Deploy-time: Jenkins on EC2 builds container images, pushes them to two ECR repos, and deploys the orchestrator Lambda, inference Lambda, S3 bucket and API Gateway. Request-time: a client calls API Gateway which proxy-invokes the orchestrator Lambda; the orchestrator invokes the inference Lambda asynchronously (fire-and-forget) so it stays under API Gateway's 30s timeout; the inference Lambda reads dummy_data.xlsx from S3 and writes its result back to S3; the orchestrator polls that same S3 result when the client re-calls with a request_id.</desc>
+  <desc>Deploy-time: Jenkins on EC2 builds container images, pushes them to two ECR repos, and deploys the orchestrator Lambda, the SQS queue and its dead-letter queue, the inference Lambda, the S3 bucket and API Gateway. Request-time: a client calls API Gateway which proxy-invokes the orchestrator Lambda; the orchestrator sends a job message to an SQS queue (fire-and-forget) so it stays under API Gateway's 30s timeout; the queue triggers the inference Lambda through an event source mapping; the inference Lambda reads dummy_data.xlsx from S3 and writes its result back to S3; the orchestrator polls that same S3 result when the client re-calls with a request_id. Messages the inference Lambda keeps failing on are moved by SQS to a dead-letter queue.</desc>
 
   <defs>
     <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
@@ -9,9 +9,12 @@
     <marker id="arrow-accent" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
       <path d="M0,0 L10,5 L0,10 z" fill="#ea580c"/>
     </marker>
+    <marker id="arrow-warn" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#64748b"/>
+    </marker>
   </defs>
 
-  <rect x="0" y="0" width="1160" height="900" fill="#ffffff"/>
+  <rect x="0" y="0" width="1200" height="820" fill="#ffffff"/>
 
   <!-- ================= boxes (drawn first so arrows/labels lay on top of edges, never under a fill) ================= -->
   <g font-family="Segoe UI, Helvetica, Arial, sans-serif">
@@ -47,17 +50,28 @@
     <text x="430" y="443" text-anchor="middle" font-size="11" fill="#475569">hello-world-lambda</text>
     <text x="430" y="457" text-anchor="middle" font-size="11" fill="#475569">FastAPI (Mangum), timeout 15s</text>
 
+    <!-- SQS queue -->
+    <rect x="610" y="400" width="160" height="72" rx="6" fill="#fff7ed" stroke="#ea580c" stroke-width="1.8"/>
+    <text x="690" y="426" text-anchor="middle" font-size="13" fill="#0f172a">SQS Queue</text>
+    <text x="690" y="443" text-anchor="middle" font-size="11" fill="#475569">hello-world-jobs</text>
+    <text x="690" y="457" text-anchor="middle" font-size="11" fill="#475569">visibility timeout 3600s</text>
+
+    <!-- Dead-letter queue -->
+    <rect x="610" y="520" width="160" height="60" rx="6" fill="#f8fafc" stroke="#64748b" stroke-width="1.4"/>
+    <text x="690" y="545" text-anchor="middle" font-size="13" fill="#0f172a">Dead-Letter Queue</text>
+    <text x="690" y="562" text-anchor="middle" font-size="11" fill="#475569">hello-world-jobs-dlq</text>
+
     <!-- Inference Lambda -->
-    <rect x="660" y="400" width="220" height="72" rx="6" fill="#eef2ff" stroke="#334155" stroke-width="1.6"/>
-    <text x="770" y="426" text-anchor="middle" font-size="13" fill="#0f172a">Inference Lambda</text>
-    <text x="770" y="443" text-anchor="middle" font-size="11" fill="#475569">hello-world-inference-lambda</text>
-    <text x="770" y="457" text-anchor="middle" font-size="11" fill="#475569">reads xlsx, timeout 60s</text>
+    <rect x="850" y="400" width="220" height="72" rx="6" fill="#eef2ff" stroke="#334155" stroke-width="1.6"/>
+    <text x="960" y="426" text-anchor="middle" font-size="13" fill="#0f172a">Inference Lambda</text>
+    <text x="960" y="443" text-anchor="middle" font-size="11" fill="#475569">hello-world-inference-lambda</text>
+    <text x="960" y="457" text-anchor="middle" font-size="11" fill="#475569">SQS trigger, timeout 600s</text>
 
     <!-- S3 -->
-    <rect x="460" y="560" width="220" height="72" rx="6" fill="#f8fafc" stroke="#334155" stroke-width="1.6"/>
-    <text x="570" y="586" text-anchor="middle" font-size="13" fill="#0f172a">S3 bucket</text>
-    <text x="570" y="603" text-anchor="middle" font-size="11" fill="#475569">enterprise-bucket-&lt;account&gt;</text>
-    <text x="570" y="617" text-anchor="middle" font-size="11" fill="#475569">dummy_data.xlsx, results/*.json</text>
+    <rect x="460" y="660" width="220" height="72" rx="6" fill="#f8fafc" stroke="#334155" stroke-width="1.6"/>
+    <text x="570" y="686" text-anchor="middle" font-size="13" fill="#0f172a">S3 bucket</text>
+    <text x="570" y="703" text-anchor="middle" font-size="11" fill="#475569">enterprise-bucket-&lt;account&gt;</text>
+    <text x="570" y="717" text-anchor="middle" font-size="11" fill="#475569">dummy_data.xlsx, results/*.json</text>
 
     <!-- Client -->
     <rect x="30" y="560" width="220" height="60" rx="6" fill="#f8fafc" stroke="#334155" stroke-width="1.4"/>
@@ -70,9 +84,10 @@
     <line x1="580" y1="160" x2="580" y2="198"/>
     <path d="M680,222 C 780,222 820,220 898,220"/>
     <path d="M520,260 C 485,310 455,350 432,398"/>
-    <path d="M640,260 C 700,310 740,350 762,398"/>
+    <path d="M600,260 C 630,330 670,350 690,398"/>
+    <path d="M650,260 C 800,290 930,330 950,398"/>
     <path d="M480,225 L140,225 L140,398"/>
-    <path d="M700,235 C 900,270 1000,330 1000,480 C 1000,540 900,558 682,585"/>
+    <path d="M700,238 C 980,255 1170,330 1170,480 C 1170,640 900,715 682,712"/>
   </g>
   <g font-family="Segoe UI, Helvetica, Arial, sans-serif" font-size="12.5" fill="#475569">
     <text x="588" y="93">git push (dev branch)</text>
@@ -80,45 +95,62 @@
     <text x="710" y="212">docker push image (×2 repos)</text>
     <text x="345" y="325" text-anchor="middle">deploy: create/update</text>
     <text x="345" y="340" text-anchor="middle">function (image from ECR)</text>
-    <text x="838" y="325" text-anchor="middle">deploy: create/update</text>
-    <text x="838" y="340" text-anchor="middle">function (image from ECR)</text>
-    <text x="150" y="300">create REST API + /hello</text>
-    <text x="150" y="315">route + API key + usage plan</text>
-    <text x="895" y="450">create bucket +</text>
-    <text x="895" y="465">upload dummy_data.xlsx</text>
+    <text x="672" y="332">create queue + DLQ</text>
+    <text x="925" y="342">deploy: create/update</text>
+    <text x="925" y="357">function (image from ECR)</text>
+    <text x="150" y="268">create REST API + /hello</text>
+    <text x="150" y="283">route + API key + usage plan</text>
+    <text x="905" y="735">create bucket +</text>
+    <text x="905" y="750">upload dummy_data.xlsx</text>
   </g>
 
   <!-- ================= runtime (solid) arrows ================= -->
   <g stroke="#1e293b" stroke-width="1.8" fill="none" marker-end="url(#arrow)">
     <line x1="140" y1="558" x2="140" y2="472"/>
     <line x1="252" y1="435" x2="318" y2="435"/>
-    <path d="M770,472 C 700,520 650,545 622,558"/>
-    <path d="M425,472 C 450,510 470,535 495,558"/>
+    <line x1="772" y1="435" x2="848" y2="435"/>
+    <path d="M940,472 C 930,600 800,690 682,690"/>
+    <path d="M440,472 C 450,560 490,620 520,658"/>
   </g>
   <g font-family="Segoe UI, Helvetica, Arial, sans-serif" font-size="12.5" fill="#0f172a">
-    <text x="150" y="520">GET /hello</text>
-    <text x="150" y="535">[?request_id]</text>
+    <text x="150" y="505">POST / GET /hello</text>
+    <text x="150" y="520">[?request_id]</text>
     <text x="285" y="424" text-anchor="middle">proxy</text>
     <text x="285" y="452" text-anchor="middle">invoke</text>
-    <text x="690" y="520" text-anchor="middle">GetObject xlsx /</text>
-    <text x="690" y="535" text-anchor="middle">PutObject result</text>
-    <text x="450" y="520">GetObject</text>
-    <text x="450" y="535">result (poll)</text>
+    <text x="810" y="379" text-anchor="middle">event source</text>
+    <text x="810" y="394" text-anchor="middle">mapping (poll)</text>
+    <text x="930" y="600">GetObject xlsx /</text>
+    <text x="930" y="615">PutObject result</text>
+    <text x="445" y="540" text-anchor="end">GetObject</text>
+    <text x="445" y="555" text-anchor="end">result (poll)</text>
   </g>
 
-  <!-- highlighted async-invoke arrow: the mechanism that keeps the orchestrator under API Gateway's 30s limit -->
-  <line x1="540" y1="425" x2="656" y2="425" stroke="#ea580c" stroke-width="3" marker-end="url(#arrow-accent)"/>
-  <text x="598" y="415" text-anchor="middle" font-family="Segoe UI, Helvetica, Arial, sans-serif" font-size="12.5" font-weight="600" fill="#ea580c">invoke async (Event)</text>
+  <!-- highlighted SQS hand-off arrow: the mechanism that keeps the orchestrator under API Gateway's 30s limit -->
+  <line x1="542" y1="435" x2="606" y2="435" stroke="#ea580c" stroke-width="3" marker-end="url(#arrow-accent)"/>
+  <g font-family="Segoe UI, Helvetica, Arial, sans-serif" font-size="12.5" font-weight="600" fill="#ea580c">
+    <text x="574" y="379" text-anchor="middle">SendMessage</text>
+    <text x="574" y="394" text-anchor="middle">{request_id}</text>
+  </g>
+
+  <!-- failure path: SQS -> DLQ after repeated failed receives -->
+  <line x1="690" y1="474" x2="690" y2="518" stroke="#64748b" stroke-width="1.8" marker-end="url(#arrow-warn)"/>
+  <g font-family="Segoe UI, Helvetica, Arial, sans-serif" font-size="12.5" fill="#475569">
+    <text x="700" y="493">after maxReceiveCount</text>
+    <text x="700" y="508">failed receives</text>
+  </g>
 
   <!-- ================= legend ================= -->
   <g font-family="Segoe UI, Helvetica, Arial, sans-serif" font-size="12">
-    <line x1="30" y1="700" x2="70" y2="700" stroke="#64748b" stroke-width="1.6" stroke-dasharray="6 5"/>
-    <text x="80" y="704" fill="#334155">deploy-time (Jenkins pipeline)</text>
+    <line x1="30" y1="680" x2="70" y2="680" stroke="#64748b" stroke-width="1.6" stroke-dasharray="6 5"/>
+    <text x="80" y="684" fill="#334155">deploy-time (Jenkins pipeline)</text>
 
-    <line x1="30" y1="726" x2="70" y2="726" stroke="#1e293b" stroke-width="1.8"/>
-    <text x="80" y="730" fill="#334155">request-time (runtime call)</text>
+    <line x1="30" y1="706" x2="70" y2="706" stroke="#1e293b" stroke-width="1.8"/>
+    <text x="80" y="710" fill="#334155">request-time (runtime call)</text>
 
-    <line x1="30" y1="752" x2="70" y2="752" stroke="#ea580c" stroke-width="3"/>
-    <text x="80" y="756" fill="#ea580c">async invoke — the hop that avoids the 30s API Gateway timeout</text>
+    <line x1="30" y1="732" x2="70" y2="732" stroke="#ea580c" stroke-width="3"/>
+    <text x="80" y="736" fill="#ea580c">SQS hand-off — avoids the 30s API Gateway timeout</text>
+
+    <line x1="30" y1="758" x2="70" y2="758" stroke="#64748b" stroke-width="1.8"/>
+    <text x="80" y="762" fill="#334155">failure path — poison messages land in the DLQ</text>
   </g>
 </svg>

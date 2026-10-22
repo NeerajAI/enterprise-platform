@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Builds the inference Lambda container image, pushes it to ECR, and creates/updates
 # the Lambda function. This Lambda does the actual (potentially slow) work that the
-# orchestrator Lambda used to do inline; it's invoked asynchronously so it isn't
-# bound by API Gateway's 30s integration timeout.
+# orchestrator Lambda used to do inline; it's triggered by messages on the SQS queue
+# (via an event source mapping) so it isn't bound by API Gateway's 30s integration timeout.
 set -euo pipefail
 
 AWS_REGION="${AWS_REGION:-us-east-1}"
@@ -14,11 +14,23 @@ ROLE_NAME="${INFERENCE_LAMBDA_ROLE_NAME:-hello-world-inference-lambda-role}"
 ECR_URI="${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/${ECR_REPO_NAME}"
 RESULTS_PREFIX="${RESULTS_PREFIX:-results/}"
 RESERVED_CONCURRENCY="${INFERENCE_LAMBDA_RESERVED_CONCURRENCY:-10}"
+# Keep in sync with the queue's visibility timeout (6x this), set in infra/deploy_sqs.sh.
+LAMBDA_TIMEOUT="${INFERENCE_LAMBDA_TIMEOUT:-600}"
+# Caps how many inference invocations the queue can run in parallel. Kept below the
+# reserved concurrency so SQS doesn't over-poll, get throttled, and burn through a
+# message's receive count (which would push it to the DLQ for no real failure).
+SQS_MAX_CONCURRENCY="${INFERENCE_SQS_MAX_CONCURRENCY:-5}"
 
 # Populated by infra/deploy_s3.sh (run earlier in the pipeline) so this script
 # knows which bucket/object the Lambda should be wired up to read from / write results to.
 if [ -f s3_output.env ]; then
   . ./s3_output.env
+fi
+
+# Populated by infra/deploy_sqs.sh (run earlier in the pipeline) so this script
+# knows which queue should trigger the Lambda.
+if [ -f sqs_output.env ]; then
+  . ./sqs_output.env
 fi
 
 # Every resource this pipeline creates is tagged AI=true so it can be found and torn down later.
@@ -61,6 +73,15 @@ if [ -n "${S3_BUCKET_NAME:-}" ]; then
     --policy-document "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"Allow\",\"Action\":[\"s3:GetObject\",\"s3:PutObject\"],\"Resource\":\"arn:aws:s3:::${S3_BUCKET_NAME}/*\"}]}"
 fi
 
+if [ -n "${SQS_QUEUE_ARN:-}" ]; then
+  # Lambda validates these on event source mapping creation, so they have to be in
+  # place before the mapping below.
+  echo "==> Granting inference Lambda role permission to consume from '${SQS_QUEUE_NAME}'"
+  aws iam put-role-policy --role-name "${ROLE_NAME}" \
+    --policy-name "sqs-consume-${SQS_QUEUE_NAME}" \
+    --policy-document "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"Allow\",\"Action\":[\"sqs:ReceiveMessage\",\"sqs:DeleteMessage\",\"sqs:GetQueueAttributes\"],\"Resource\":\"${SQS_QUEUE_ARN}\"}]}"
+fi
+
 LAMBDA_ENV_VARS="Variables={BUCKET_NAME=${S3_BUCKET_NAME:-},OBJECT_KEY=${S3_OBJECT_KEY:-dummy_data.xlsx},RESULTS_PREFIX=${RESULTS_PREFIX}}"
 
 echo "==> Creating or updating inference Lambda function '${FUNCTION_NAME}'"
@@ -73,7 +94,7 @@ if aws lambda get-function --function-name "${FUNCTION_NAME}" --region "${AWS_RE
   aws lambda update-function-configuration \
     --function-name "${FUNCTION_NAME}" \
     --environment "${LAMBDA_ENV_VARS}" \
-    --timeout 600 \
+    --timeout "${LAMBDA_TIMEOUT}" \
     --region "${AWS_REGION}" >/dev/null
   aws lambda wait function-updated --function-name "${FUNCTION_NAME}" --region "${AWS_REGION}"
 else
@@ -82,7 +103,7 @@ else
     --package-type Image \
     --code ImageUri="${ECR_URI}:${IMAGE_TAG}" \
     --role "${ROLE_ARN}" \
-    --timeout 600 \
+    --timeout "${LAMBDA_TIMEOUT}" \
     --memory-size 256 \
     --environment "${LAMBDA_ENV_VARS}" \
     --tags "${TAG_KEY}=${TAG_VALUE}" \
@@ -109,6 +130,41 @@ aws lambda put-function-concurrency \
 LAMBDA_ARN="$(aws lambda get-function --function-name "${FUNCTION_NAME}" --region "${AWS_REGION}" --query 'Configuration.FunctionArn' --output text)"
 aws lambda tag-resource --resource "${LAMBDA_ARN}" --tags "${TAG_KEY}=${TAG_VALUE}" --region "${AWS_REGION}"
 echo "Inference Lambda deployed: ${LAMBDA_ARN}"
+
+if [ -n "${SQS_QUEUE_ARN:-}" ]; then
+  echo "==> Ensuring SQS trigger (event source mapping) '${SQS_QUEUE_NAME}' -> '${FUNCTION_NAME}'"
+  MAPPING_UUID="$(aws lambda list-event-source-mappings --function-name "${FUNCTION_NAME}" \
+    --event-source-arn "${SQS_QUEUE_ARN}" --region "${AWS_REGION}" \
+    --query 'EventSourceMappings[0].UUID' --output text)"
+  if [ -z "${MAPPING_UUID}" ] || [ "${MAPPING_UUID}" == "None" ]; then
+    # A role policy attached moments ago can take a few seconds to propagate, and
+    # Lambda rejects the mapping until it sees the SQS permissions, so retry.
+    for attempt in 1 2 3 4 5 6; do
+      if aws lambda create-event-source-mapping \
+          --function-name "${FUNCTION_NAME}" \
+          --event-source-arn "${SQS_QUEUE_ARN}" \
+          --batch-size 1 \
+          --scaling-config "MaximumConcurrency=${SQS_MAX_CONCURRENCY}" \
+          --tags "${TAG_KEY}=${TAG_VALUE}" \
+          --region "${AWS_REGION}" >/dev/null; then
+        break
+      fi
+      if [ "${attempt}" -eq 6 ]; then
+        echo "Could not create the SQS event source mapping" >&2
+        exit 1
+      fi
+      echo "Event source mapping not accepted yet (attempt ${attempt}/6), waiting for IAM propagation..."
+      sleep 10
+    done
+  else
+    aws lambda update-event-source-mapping \
+      --uuid "${MAPPING_UUID}" \
+      --batch-size 1 \
+      --scaling-config "MaximumConcurrency=${SQS_MAX_CONCURRENCY}" \
+      --enabled \
+      --region "${AWS_REGION}" >/dev/null
+  fi
+fi
 
 {
   echo "INFERENCE_LAMBDA_FUNCTION_NAME=${FUNCTION_NAME}"

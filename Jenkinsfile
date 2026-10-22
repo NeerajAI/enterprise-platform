@@ -9,6 +9,9 @@ pipeline {
         INFERENCE_ECR_REPO_NAME        = 'hello-world-inference-lambda'
         INFERENCE_LAMBDA_FUNCTION_NAME = 'hello-world-inference-lambda'
         RESULTS_PREFIX       = 'results/'
+        // Queue between the orchestrator and inference Lambdas; its dead-letter
+        // queue is named "<SQS_QUEUE_NAME>-dlq".
+        SQS_QUEUE_NAME       = 'hello-world-jobs'
         API_NAME             = 'hello-world-api'
         // Named API_STAGE_NAME (not STAGE_NAME) because Jenkins Declarative
         // Pipeline auto-injects its own env.STAGE_NAME holding the current
@@ -49,8 +52,25 @@ pipeline {
             }
         }
 
-        // Runs before the orchestrator Lambda so deploy_lambda.sh can read
-        // inference_lambda_output.env and wire up the invoke permission + name.
+        // Runs before both Lambdas: the orchestrator needs the queue URL + send
+        // permission, and the inference Lambda needs the queue ARN to be triggered
+        // by it (both read sqs_output.env).
+        stage('Deploy SQS Queues') {
+            steps {
+                withCredentials([usernamePassword(
+                        credentialsId: 'aws-jenkins-creds',
+                        usernameVariable: 'AWS_ACCESS_KEY_ID',
+                        passwordVariable: 'AWS_SECRET_ACCESS_KEY')]) {
+                    sh '''
+                        chmod +x infra/deploy_sqs.sh
+                        ./infra/deploy_sqs.sh
+                    '''
+                }
+            }
+        }
+
+        // Runs before the orchestrator Lambda so the queue's consumer exists by the
+        // time the orchestrator starts sending jobs to it.
         stage('Build & Deploy Inference Lambda') {
             steps {
                 withCredentials([usernamePassword(
@@ -144,7 +164,7 @@ pipeline {
             echo 'Pipeline failed — check the stage logs above.'
         }
         always {
-            archiveArtifacts artifacts: 'lambda_output.env, s3_output.env, inference_lambda_output.env', allowEmptyArchive: true
+            archiveArtifacts artifacts: 'lambda_output.env, s3_output.env, sqs_output.env, inference_lambda_output.env', allowEmptyArchive: true
         }
     }
 }

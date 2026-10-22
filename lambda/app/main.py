@@ -11,11 +11,11 @@ from mangum import Mangum
 app = FastAPI()
 
 s3 = boto3.client("s3")
-lambda_client = boto3.client("lambda")
+sqs = boto3.client("sqs")
 
 BUCKET_NAME = os.environ["BUCKET_NAME"]
 RESULTS_PREFIX = os.environ.get("RESULTS_PREFIX", "results/")
-INFERENCE_LAMBDA_NAME = os.environ["INFERENCE_LAMBDA_NAME"]
+SQS_QUEUE_URL = os.environ["SQS_QUEUE_URL"]
 
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
@@ -30,17 +30,18 @@ def log_stage(message: str, width: int = 80) -> None:
 
 def start_inference():
     request_id = str(uuid.uuid4())
-    log_stage(f"STAGE 2: orchestrator invoking inference Lambda asynchronously, request_id={request_id}")
-    # Fire-and-forget: InvocationType="Event" returns as soon as the invoke is
-    # accepted, without waiting for the inference Lambda to finish. That's what
+    log_stage(f"STAGE 2: orchestrator sending job to SQS queue, request_id={request_id}")
+    # Fire-and-forget: send_message returns as soon as SQS accepts the message,
+    # without waiting for the inference Lambda to pick it up or finish. That's what
     # keeps this orchestrator's own response time well under API Gateway's 30s
-    # integration timeout, regardless of how long the actual work takes.
-    lambda_client.invoke(
-        FunctionName=INFERENCE_LAMBDA_NAME,
-        InvocationType="Event",
-        Payload=json.dumps({"request_id": request_id}).encode("utf-8"),
+    # integration timeout, regardless of how long the actual work takes. The queue
+    # also buffers/throttles the fan-out and moves jobs the inference Lambda keeps
+    # failing on to a dead-letter queue instead of dropping them.
+    sqs.send_message(
+        QueueUrl=SQS_QUEUE_URL,
+        MessageBody=json.dumps({"request_id": request_id}),
     )
-    log_stage(f"STAGE 3: inference Lambda invoked, returning request_id={request_id} to caller")
+    log_stage(f"STAGE 3: job queued in SQS, returning request_id={request_id} to caller")
     return request_id
 
 
