@@ -14,9 +14,9 @@ ROLE_NAME="${INFERENCE_LAMBDA_ROLE_NAME:-hello-world-inference-lambda-role}"
 ECR_URI="${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/${ECR_REPO_NAME}"
 RESULTS_PREFIX="${RESULTS_PREFIX:-results/}"
 RESERVED_CONCURRENCY="${INFERENCE_LAMBDA_RESERVED_CONCURRENCY:-10}"
-# Bedrock model (or cross-region inference profile) used to summarize the table.
-# The account must have access to it: Anthropic models need a one-time use-case
-# form submitted in the Bedrock console before the first call succeeds.
+# Claude model ID used (through Bedrock Mantle) to summarize the table. The account
+# must have access to it: Anthropic models need a one-time use-case form submitted
+# in the Bedrock console before the first call succeeds.
 BEDROCK_MODEL_ID="${BEDROCK_MODEL_ID:-us.anthropic.claude-sonnet-4-6}"
 # Keep in sync with the queue's visibility timeout (6x this), set in infra/deploy_sqs.sh.
 LAMBDA_TIMEOUT="${INFERENCE_LAMBDA_TIMEOUT:-600}"
@@ -86,15 +86,18 @@ if [ -n "${SQS_QUEUE_ARN:-}" ]; then
     --policy-document "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"Allow\",\"Action\":[\"sqs:ReceiveMessage\",\"sqs:DeleteMessage\",\"sqs:GetQueueAttributes\"],\"Resource\":\"${SQS_QUEUE_ARN}\"}]}"
 fi
 
-# Lets the inference Lambda call Claude on Bedrock to summarize the table. The Converse
-# API is authorized as bedrock:InvokeModel. Both resource types are needed: a
-# cross-region inference profile ID (e.g. "us.anthropic.…") is checked against the
-# profile in this account AND the underlying foundation models in each region it
-# routes to, hence the wildcard region on the foundation-model ARN.
-echo "==> Granting inference Lambda role permission to invoke Bedrock model '${BEDROCK_MODEL_ID}'"
+# Lets the inference Lambda call Claude through Bedrock's "Mantle" endpoint (the
+# Anthropic SDK's AnthropicBedrockMantle client), which is a separate IAM service from
+# the regular bedrock:InvokeModel. Mirrors the read + inference actions of the AWS
+# managed policy AmazonBedrockMantleInferenceAccess, limited to this account/region.
+echo "==> Granting inference Lambda role permission to call Claude via Bedrock Mantle (model '${BEDROCK_MODEL_ID}')"
 aws iam put-role-policy --role-name "${ROLE_NAME}" \
-  --policy-name "bedrock-invoke" \
-  --policy-document "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"Allow\",\"Action\":[\"bedrock:InvokeModel\",\"bedrock:InvokeModelWithResponseStream\"],\"Resource\":[\"arn:aws:bedrock:*::foundation-model/*\",\"arn:aws:bedrock:*:${AWS_ACCOUNT_ID}:inference-profile/*\"]}]}"
+  --policy-name "bedrock-mantle-inference" \
+  --policy-document "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"Allow\",\"Action\":[\"bedrock-mantle:Get*\",\"bedrock-mantle:List*\",\"bedrock-mantle:CreateInference\"],\"Resource\":\"arn:aws:bedrock-mantle:${AWS_REGION}:${AWS_ACCOUNT_ID}:project/*\"}]}"
+
+# Earlier versions called Bedrock's Converse API and granted bedrock:InvokeModel;
+# that policy is no longer used, so remove it (best-effort).
+aws iam delete-role-policy --role-name "${ROLE_NAME}" --policy-name "bedrock-invoke" >/dev/null 2>&1 || true
 
 LAMBDA_ENV_VARS="Variables={BUCKET_NAME=${S3_BUCKET_NAME:-},OBJECT_KEY=${S3_OBJECT_KEY:-dummy_data.xlsx},RESULTS_PREFIX=${RESULTS_PREFIX},BEDROCK_MODEL_ID=${BEDROCK_MODEL_ID}}"
 

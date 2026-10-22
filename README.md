@@ -95,22 +95,27 @@ queue between them:
 
 After the inference Lambda has saved the result to S3, it makes a second call:
 it sends the Excel table (as a markdown table) to a Claude model on Amazon
-Bedrock through the `Converse` API and prints the model's summary to the
-Lambda's log. Look for the `STAGE 9` lines (and the `Bedrock summary of the
-table` entry between them) in the CloudWatch log group
-`/aws/lambda/hello-world-inference-lambda`.
+Bedrock and prints the model's summary to the Lambda's log. Look for the
+`STAGE 9` lines (and the `Bedrock summary of the table` entry between them) in
+the CloudWatch log group `/aws/lambda/hello-world-inference-lambda`.
 
+- **How it's called:** with the Anthropic Python SDK's `AnthropicBedrockMantle`
+  client (`anthropic[bedrock]`), i.e. the Messages API served at
+  `bedrock-mantle.<region>.api.aws`. Requests are signed (SigV4) with the
+  Lambda role's credentials, so there is no API key to manage.
 - **Model:** set by `BEDROCK_MODEL_ID` in the `Jenkinsfile` (currently
-  `us.anthropic.claude-sonnet-4-6`). Because `Converse` is model-agnostic,
-  switching to another Claude model is just a change to that value.
+  `us.anthropic.claude-sonnet-4-6`). Switching to another Claude model is just
+  a change to that value.
 - **Failure behaviour:** the summary runs *after* the result is written, and a
   Bedrock error (throttling, model access not granted) is logged but doesn't
   fail the job. The API result is unaffected, and the message isn't retried
   or sent to the dead-letter queue because of it.
 - **IAM:** `infra/deploy_inference_lambda.sh` gives the inference Lambda's role
-  `bedrock:InvokeModel` / `InvokeModelWithResponseStream` on foundation models
-  and this account's inference profiles. No new permission is needed on the
-  `jenkins-ci` user (it already has `iam:PutRolePolicy` on that role).
+  `bedrock-mantle:CreateInference` (plus `Get*` / `List*`) on this account's
+  Mantle projects. This is a different IAM service from the regular
+  `bedrock:InvokeModel`, which is why that older permission isn't used. No new
+  permission is needed on the `jenkins-ci` user (it already has
+  `iam:PutRolePolicy` on that role).
 - **One-time account setup:** Anthropic models on Bedrock need a one-time
   use-case form submitted in the Bedrock console before the first call
   succeeds (open the model in the console's playground once). Until then the

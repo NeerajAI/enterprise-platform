@@ -5,12 +5,20 @@ import os
 
 import boto3
 import openpyxl
-from botocore.config import Config
+from anthropic import AnthropicBedrockMantle
 
 s3 = boto3.client("s3")
-# Generous read timeout: the model can take a while to generate, and the Lambda's
-# own timeout (600s) is far larger than the botocore default of 60s.
-bedrock = boto3.client("bedrock-runtime", config=Config(read_timeout=120, retries={"max_attempts": 3, "mode": "standard"}))
+# Claude on Bedrock through the Anthropic SDK's "Mantle" client (the Messages API at
+# bedrock-mantle.<region>.api.aws). Requests are SigV4-signed with this Lambda's
+# execution-role credentials, so no API key is needed; the role needs
+# bedrock-mantle:CreateInference (see infra/deploy_inference_lambda.sh).
+# Generous timeout: the Lambda's own timeout (600s) is far larger than what a short
+# summary needs, so allow the model time instead of failing early.
+claude = AnthropicBedrockMantle(
+    aws_region=os.environ["AWS_REGION"],
+    default_headers={"anthropic-workspace-id": "default"},
+    timeout=120,
+)
 
 BUCKET_NAME = os.environ["BUCKET_NAME"]
 OBJECT_KEY = os.environ.get("OBJECT_KEY", "dummy_data.xlsx")
@@ -49,18 +57,16 @@ def to_markdown_table(rows) -> str:
 
 
 def summarize_table(rows) -> str:
-    # Converse is Bedrock's model-agnostic chat API, so swapping BEDROCK_MODEL_ID
-    # to a different Claude model needs no code change.
-    response = bedrock.converse(
-        modelId=BEDROCK_MODEL_ID,
-        system=[{"text": "You summarize tabular data for a technical audience. Be concise and factual."}],
+    response = claude.messages.create(
+        model=BEDROCK_MODEL_ID,
+        max_tokens=300,
+        system="You summarize tabular data for a technical audience. Be concise and factual.",
         messages=[{
             "role": "user",
-            "content": [{"text": "Summarize this table in 2-3 sentences, noting any patterns or notable values:\n\n" + to_markdown_table(rows)}],
+            "content": "Summarize this table in 2-3 sentences, noting any patterns or notable values:\n\n" + to_markdown_table(rows),
         }],
-        inferenceConfig={"maxTokens": 300, "temperature": 0.2},
     )
-    return response["output"]["message"]["content"][0]["text"]
+    return "".join(block.text for block in response.content if block.type == "text")
 
 
 def process(request_id: str) -> None:
