@@ -5,25 +5,12 @@ import os
 
 import boto3
 import openpyxl
-from anthropic import AnthropicBedrockMantle
 
 s3 = boto3.client("s3")
-# Claude on Bedrock through the Anthropic SDK's "Mantle" client (the Messages API at
-# bedrock-mantle.<region>.api.aws). Requests are SigV4-signed with this Lambda's
-# execution-role credentials, so no API key is needed; the role needs
-# bedrock-mantle:CreateInference (see infra/deploy_inference_lambda.sh).
-# Generous timeout: the Lambda's own timeout (600s) is far larger than what a short
-# summary needs, so allow the model time instead of failing early.
-claude = AnthropicBedrockMantle(
-    aws_region=os.environ["AWS_REGION"],
-    default_headers={"anthropic-workspace-id": "default"},
-    timeout=120,
-)
 
 BUCKET_NAME = os.environ["BUCKET_NAME"]
 OBJECT_KEY = os.environ.get("OBJECT_KEY", "dummy_data.xlsx")
 RESULTS_PREFIX = os.environ.get("RESULTS_PREFIX", "results/")
-BEDROCK_MODEL_ID = os.environ["BEDROCK_MODEL_ID"]
 
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
@@ -48,27 +35,6 @@ def read_dummy_data():
     return [dict(zip(header, row)) for row in data_rows]
 
 
-def to_markdown_table(rows) -> str:
-    headers = list(rows[0].keys())
-    lines = ["| " + " | ".join(str(h) for h in headers) + " |", "| " + " | ".join("---" for _ in headers) + " |"]
-    for row in rows:
-        lines.append("| " + " | ".join(str(row.get(h, "")) for h in headers) + " |")
-    return "\n".join(lines)
-
-
-def summarize_table(rows) -> str:
-    response = claude.messages.create(
-        model=BEDROCK_MODEL_ID,
-        max_tokens=300,
-        system="You summarize tabular data for a technical audience. Be concise and factual.",
-        messages=[{
-            "role": "user",
-            "content": "Summarize this table in 2-3 sentences, noting any patterns or notable values:\n\n" + to_markdown_table(rows),
-        }],
-    )
-    return "".join(block.text for block in response.content if block.type == "text")
-
-
 def process(request_id: str) -> None:
     log_stage(f"STAGE 6: inference Lambda triggered by SQS message, request_id={request_id}")
 
@@ -91,18 +57,6 @@ def process(request_id: str) -> None:
         ContentType="application/json",
     )
     log_stage(f"STAGE 8 done: result written to S3, request_id={request_id}")
-
-    # Runs after the result is already saved, and a failure here is logged rather
-    # than raised: the summary is an extra, so a Bedrock hiccup (throttling, model
-    # access not granted yet) must not fail the job, retry it, or re-invoke the
-    # model up to maxReceiveCount times before the message lands in the DLQ.
-    log_stage(f"STAGE 9: summarizing table with Bedrock model {BEDROCK_MODEL_ID}, request_id={request_id}")
-    try:
-        summary = summarize_table(dummy_data)
-        logger.info("Bedrock summary of the table (request_id=%s):\n%s", request_id, summary)
-        log_stage(f"STAGE 9 done: summary printed above, request_id={request_id}")
-    except Exception:
-        logger.exception("STAGE 9 failed: could not summarize the table with Bedrock, request_id=%s", request_id)
 
 
 def handler(event, context):
