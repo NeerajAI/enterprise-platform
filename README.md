@@ -101,7 +101,7 @@ table` entry between them) in the CloudWatch log group
 `/aws/lambda/hello-world-inference-lambda`.
 
 - **Model:** set by `BEDROCK_MODEL_ID` in the `Jenkinsfile` (currently
-  `us.anthropic.claude-haiku-5-5`). Because `Converse` is model-agnostic,
+  `anthropic.claude-sonnet-4-6`). Because `Converse` is model-agnostic,
   switching to another Claude model is just a change to that value.
 - **Failure behaviour:** the summary runs *after* the result is written, and a
   Bedrock error (throttling, model access not granted) is logged but doesn't
